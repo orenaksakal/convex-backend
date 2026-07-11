@@ -173,6 +173,14 @@ pub trait Storage: Send + Sync + Debug {
         &self,
         key: &FullyQualifiedObjectKey,
     ) -> anyhow::Result<Option<ObjectAttributes>>;
+    /// Copies an object of `expected_size` to an existing local file.
+    /// Implementations must truncate the destination and write from its start.
+    async fn download_fq_object_to_file(
+        &self,
+        key: &FullyQualifiedObjectKey,
+        file: &mut tokio::fs::File,
+        expected_size: u64,
+    ) -> anyhow::Result<u64>;
     /// Not intended to be called directly.
     /// Use get_range() or get() instead.
     fn get_small_range(
@@ -1123,6 +1131,24 @@ impl<RT: Runtime> Storage for LocalDirStorage<RT> {
         key: &FullyQualifiedObjectKey,
     ) -> anyhow::Result<Option<ObjectAttributes>> {
         local_object_attributes(Path::new(key.as_str()))
+    }
+
+    async fn download_fq_object_to_file(
+        &self,
+        key: &FullyQualifiedObjectKey,
+        file: &mut tokio::fs::File,
+        expected_size: u64,
+    ) -> anyhow::Result<u64> {
+        let source_path = Path::new(key.as_str());
+        let source = tokio::fs::File::open(source_path).await?;
+        file.set_len(0).await?;
+        tokio::io::AsyncSeekExt::seek(file, SeekFrom::Start(0)).await?;
+        // Copy one byte past the observed size so a concurrently growing source
+        // fails the caller's size check without consuming unbounded temporary disk.
+        let mut bounded_source =
+            tokio::io::AsyncReadExt::take(source, expected_size.saturating_add(1));
+        let copied_bytes = tokio::io::copy(&mut bounded_source, file).await?;
+        Ok(copied_bytes)
     }
 
     fn storage_type_proto(&self) -> pb::searchlight::StorageType {

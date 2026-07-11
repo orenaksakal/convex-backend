@@ -41,6 +41,10 @@ Do not use checksum or server-side-encryption switches as substitutes for this
 setting; they do not change multipart boundaries. Existing AWS S3 deployments
 retain adaptive part sizing when the fixed-size variable is unset.
 
+For ZIP snapshot imports, compatible endpoints must return exact
+`Content-Length`, `Content-Range`, and `ETag` headers for ranged `GetObject`
+requests and honor `If-Match`.
+
 Then run the backend!
 
 ## Migrating storage providers
@@ -59,3 +63,10 @@ Then set up a fresh backend with the new storage provider and import the data:
 ```sh
 npx convex import --replace-all <path-to-export-file>
 ```
+
+ZIP snapshot imports are downloaded to a local temporary file before parsing,
+including when the snapshot-import bucket uses S3. The backend host or
+container therefore needs temporary disk space for the full ZIP plus normal
+runtime headroom. The file uses the process's default temporary directory; on
+Unix, set `TMPDIR` before starting the backend to select another location. The
+temporary file is removed after the import's lazy archive readers are closed.
