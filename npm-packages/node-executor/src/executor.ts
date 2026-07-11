@@ -18,13 +18,16 @@ import {
   EnvironmentVariable,
 } from "./convex";
 import {
+  captureErrorFrames,
   FrameData,
   extractErrorMessage,
-  registerPrepareStackTrace,
+  extractErrorName,
+  installPrepareStackTrace,
+  tryInstallPrepareStackTrace,
 } from "./errors";
 import { findLineNumbers } from "./analyze";
 import { Syscalls, SyscallsImpl } from "./syscalls";
-import { SourcePackage, maybeDownloadAndLinkPackages } from "./source_package";
+import { SourcePackage, acquireSourcePackage } from "./source_package";
 import { buildDeps, BuildDepsRequest } from "./build_deps";
 import { ConvexError, JSONValue } from "convex/values";
 import { log, logDebug, logDurationMs } from "./log";
@@ -129,10 +132,15 @@ async function runWithEnvironmentVariables<T>(
 }
 
 export const ogProcessExit = process.exit;
+const processExitSentinel = Symbol("node-executor-process-exit");
 
 function unhandledRejectionHandler(
   responseStream: Writable,
-  event: "unhandledRejection" | "uncaughtException" | "process.exit",
+  event:
+    | "unhandledRejection"
+    | "uncaughtException"
+    | "process.exit"
+    | "executorStateInvalid",
   e: unknown,
 ) {
   // Respond with a user error.
@@ -142,7 +150,7 @@ function unhandledRejectionHandler(
     type: "error",
     message: extractErrorMessage(e),
     name: event,
-    frames: [],
+    frames: captureErrorFrames(e),
     syscallTrace:
       (globalSyscalls.getStore() as SyscallsImpl | null)?.syscallTrace ?? {},
     memoryAllocatedMb: AWS_LAMBDA_FUNCTION_MEMORY_SIZE,
@@ -151,19 +159,16 @@ function unhandledRejectionHandler(
     totalExecutorTimeMs: 0,
     exitingProcess: true,
   };
-  if (e instanceof Error) {
-    // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-    e.stack; // calls overridden prepareStackTrace
-    if ((e as any).__frameData) {
-      response.frames = JSON.parse((e as any).__frameData);
-    }
-  }
   const json = JSON.stringify(response);
-  log(json);
   // Use `.end()` to make sure that no other finish message makes it into the
   // stream, then exit the process to prevent any ongoing async work from
   // leaking into the next invocation.
-  responseStream.on("finish", () => ogProcessExit(1));
+  if (responseStream.writableEnded || responseStream.destroyed) {
+    ogProcessExit(1);
+  }
+  const exit = () => ogProcessExit(1);
+  responseStream.once("finish", exit);
+  responseStream.once("close", exit);
   responseStream.end(json);
 }
 
@@ -173,29 +178,56 @@ export async function invoke(
 ): Promise<number> {
   process.removeAllListeners("unhandledRejection");
   process.removeAllListeners("uncaughtException");
-  process.on("unhandledRejection", (e: unknown) =>
-    unhandledRejectionHandler(responseStream, "unhandledRejection", e),
-  );
-  process.on("uncaughtException", (e: unknown) =>
-    unhandledRejectionHandler(responseStream, "uncaughtException", e),
-  );
-  process.exit = function processExit(code?: number): never {
+  process.on("unhandledRejection", (e: unknown) => {
+    if (e === processExitSentinel) {
+      return;
+    }
     unhandledRejectionHandler(
-      responseStream,
-      "process.exit",
-      new Error(
-        `process.exit() called ${code === undefined ? "with no exit code" : `with exit code ${code}`}`,
-      ),
+      globalResponseStream.getStore() ?? responseStream,
+      "unhandledRejection",
+      e,
     );
-    throw new Error("unreachable (unhandledRejectionHandler never returns)");
+  });
+  process.on("uncaughtException", (e: unknown) => {
+    if (e === processExitSentinel) {
+      // process.exit() already ended the owning response and scheduled the real
+      // exit on stream finish. Do not exit recursively before it can flush.
+      return;
+    }
+    unhandledRejectionHandler(
+      globalResponseStream.getStore() ?? responseStream,
+      "uncaughtException",
+      e,
+    );
+  });
+  process.exit = function processExit(_code?: number): never {
+    unhandledRejectionHandler(
+      globalResponseStream.getStore() ?? responseStream,
+      "process.exit",
+      "process.exit() called during Node execution",
+    );
+    throw processExitSentinel;
   };
 
   const start = performance.now();
   numInvocations += 1;
   logDebug(`Environment numInvocations=${numInvocations}`);
-  const result = await globalConsoleState.run(
-    defaultConsoleState(),
-    async () => {
+  if (!tryInstallPrepareStackTrace()) {
+    // A user package can replace this process-global hook with a non-writable
+    // property. Retire the contaminated shared process instead of returning an
+    // HTTP 500 forever on every later invocation.
+    unhandledRejectionHandler(
+      responseStream,
+      "executorStateInvalid",
+      "The executor stack-trace formatter cannot be restored",
+    );
+    return numInvocations;
+  }
+  // Process event listeners are global, but local invocations are concurrent.
+  // Keep the originating stream in async context so one invocation's fatal
+  // event cannot be written to whichever request happened to start last.
+  const result = await globalResponseStream.run(responseStream, () =>
+    globalConsoleState.run(defaultConsoleState(), async () => {
       const devConsole = setupConsole(responseStream);
       return await globalDevConsole.run(devConsole, async () => {
         let result;
@@ -206,11 +238,11 @@ export async function invoke(
         } else if (request.type === "build_deps") {
           result = await buildDeps(request);
         } else {
-          throw new Error(`Unknown request type ${request}`);
+          throw new Error("Unknown Node executor request type");
         }
         return result;
       });
-    },
+    }),
   );
 
   logDurationMs("Total invocation time", start);
@@ -222,6 +254,12 @@ export async function invoke(
     logDebug(
       `Dynamic executor used: reporting ${AWS_LAMBDA_BILLED_MEMORY_SIZE}MB of billed memory`,
     );
+  }
+  // A caught process-exit sentinel can let normal request cleanup finish after
+  // the fatal handler has ended this stream. Do not write a second response or
+  // turn the intended exit into a recursive write-after-end failure.
+  if (responseStream.writableEnded || responseStream.destroyed) {
+    return numInvocations;
   }
   responseStream.write(JSON.stringify(result));
   return numInvocations;
@@ -309,66 +347,74 @@ export async function execute(
   const start = performance.now();
 
   // Download missing packages and do any necessary linking
-  const local = await maybeDownloadAndLinkPackages(request.sourcePackage);
-  const downloadTimeMs = logDurationMs("downloadTime", start);
-
-  const syscalls = new SyscallsImpl(
-    request.udfPath,
-    request.requestId,
-    request.backendAddress,
-    request.backendCallbackToken,
-    request.authHeader,
-    request.userIdentity,
-    request.executionContext,
-    request.encodedParentTrace,
-    request.deployment,
-  );
-
-  countEgressBytes(); // reset egressBytes counter
-
-  let innerResult: ExecuteResponseInner;
+  const packageLease = await acquireSourcePackage(request.sourcePackage);
+  const local = packageLease.package;
   try {
-    if (!local.modules.has(request.udfPath.canonicalizedPath)) {
-      throw new Error(
-        `Couldn't find module source for ${request.udfPath.canonicalizedPath}`,
-      );
-    }
-    innerResult = await executeInner(
+    // User libraries can replace this process-global hook. Restore the executor
+    // formatter at every invocation without adding another package-root owner.
+    installPrepareStackTrace();
+    const downloadTimeMs = logDurationMs("downloadTime", start);
+
+    const syscalls = new SyscallsImpl(
+      request.udfPath,
       request.requestId,
-      local.dir,
-      request.udfPath.canonicalizedPath,
-      request.udfPath.function ?? "default",
-      request.args,
-      request.environmentVariables,
-      request.timeoutSecs,
-      syscalls,
+      request.backendAddress,
+      request.backendCallbackToken,
+      request.authHeader,
+      request.userIdentity,
+      request.executionContext,
+      request.encodedParentTrace,
+      request.deployment,
     );
-  } catch (e: any) {
-    innerResult = {
-      type: "error",
-      message: extractErrorMessage(e),
-      name: e.name,
-      exitingProcess: false,
+
+    countEgressBytes(); // reset egressBytes counter
+
+    let innerResult: ExecuteResponseInner;
+    try {
+      if (!local.modules.has(request.udfPath.canonicalizedPath)) {
+        throw new Error(
+          `Couldn't find module source for ${request.udfPath.canonicalizedPath}`,
+        );
+      }
+      innerResult = await executeInner(
+        request.requestId,
+        local.dir,
+        request.udfPath.canonicalizedPath,
+        request.udfPath.function ?? "default",
+        request.args,
+        request.environmentVariables,
+        request.timeoutSecs,
+        syscalls,
+      );
+    } catch (e: unknown) {
+      innerResult = {
+        type: "error",
+        message: extractErrorMessage(e),
+        name: extractErrorName(e),
+        exitingProcess: false,
+      };
+    } finally {
+      // The action has settled. Abort any callbacks still in flight so a dangling
+      // (un-awaited) promise can't outlive this invocation and reject into the
+      // next, unrelated one that reuses this warm process.
+      syscalls.dispose();
+    }
+
+    const totalExecutorTimeMs = logDurationMs("totalExecutorTime", start);
+    const egressBytes = countEgressBytes();
+
+    return {
+      ...innerResult,
+      numInvocations,
+      downloadTimeMs,
+      totalExecutorTimeMs,
+      syscallTrace: syscalls.syscallTrace,
+      memoryAllocatedMb: AWS_LAMBDA_BILLED_MEMORY_SIZE,
+      egressBytes,
     };
   } finally {
-    // The action has settled. Abort any callbacks still in flight so a dangling
-    // (un-awaited) promise can't outlive this invocation and reject into the
-    // next, unrelated one that reuses this warm process.
-    syscalls.dispose();
+    await packageLease.release();
   }
-
-  const totalExecutorTimeMs = logDurationMs("totalExecutorTime", start);
-  const egressBytes = countEgressBytes();
-
-  return {
-    ...innerResult,
-    numInvocations,
-    downloadTimeMs,
-    totalExecutorTimeMs,
-    syscallTrace: syscalls.syscallTrace,
-    memoryAllocatedMb: AWS_LAMBDA_BILLED_MEMORY_SIZE,
-    egressBytes,
-  };
 }
 
 export async function executeInner(
@@ -381,9 +427,8 @@ export async function executeInner(
   timeoutSecs: number,
   syscalls: Syscalls,
 ): Promise<ExecuteResponseInner> {
-  logDebug(`Executing ${relPath}:${name} from ${dir}`);
+  logDebug("Executing Node action");
   const modulesDir = path.join(dir, "modules");
-  registerPrepareStackTrace(modulesDir);
   const start = performance.now();
   // We have to reevaluate the module if the envs change since they can be used
   // in global scope. We add them as query argument to achieve this behavior.
@@ -433,19 +478,14 @@ export async function executeInner(
             }
           });
         });
-      } catch (e: any) {
-        // Accessing `e.stack` is important! Without it e.__frameData
-        // is not generated!
-        // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-        e?.stack;
-
+      } catch (e: unknown) {
         const udfTimeMs = logDurationMs("executeUdf", startExecute);
         return {
           type: "error",
           message: extractErrorMessage(e),
-          name: e?.name ?? "",
+          name: extractErrorName(e),
           data: getConvexErrorData(e),
-          frames: e?.__frameData ? JSON.parse(e.__frameData) : [],
+          frames: captureErrorFrames(e),
           udfTimeMs,
           importTimeMs,
           exitingProcess: false,
@@ -479,14 +519,19 @@ export async function executeInner(
 
 // Keep in sync with registration_impl
 function getConvexErrorData(thrown: unknown) {
-  if (
-    typeof thrown === "object" &&
-    thrown !== null &&
-    Symbol.for("ConvexError") in thrown
-  ) {
-    // At this point data has already been serialized
-    // in `invokeAction`.
-    return (thrown as ConvexError<string>).data;
+  try {
+    if (
+      typeof thrown === "object" &&
+      thrown !== null &&
+      Symbol.for("ConvexError") in thrown
+    ) {
+      // At this point data has already been serialized in `invokeAction`.
+      const data = (thrown as ConvexError<string>).data;
+      return typeof data === "string" ? data : undefined;
+    }
+  } catch {
+    // A thrown Proxy must not replace the original action failure while the
+    // executor checks for optional ConvexError data.
   }
   return undefined;
 }
@@ -515,31 +560,36 @@ export type AnalyzeResponse =
 export async function analyze(
   request: AnalyzeRequest,
 ): Promise<AnalyzeResponse> {
-  return await runWithEnvironmentVariables(
-    request.environmentVariables,
-    async () => {
-      const local = await maybeDownloadAndLinkPackages(request.sourcePackage);
-      const modulesDir = path.join(local.dir, "modules");
-      registerPrepareStackTrace(modulesDir);
-      const modules: Record<CanonicalizedModulePath, AnalyzedFunctions> = {};
-      for (const modulePath of local.modules) {
-        try {
-          const filePath = path.join(modulesDir, modulePath);
-          modules[modulePath] = await analyzeModule(filePath);
-        } catch (e: any) {
-          // eslint-disable-next-line @typescript-eslint/no-unused-expressions
-          e.stack;
-          return {
-            type: "error",
-            message: `Failed to analyze ${modulePath}: ${extractErrorMessage(e)}`,
-            frames: e.__frameData ? JSON.parse(e.__frameData) : [],
-          };
+  const packageLease = await acquireSourcePackage(request.sourcePackage);
+  const local = packageLease.package;
+  try {
+    return await runWithEnvironmentVariables(
+      request.environmentVariables,
+      async (envHash) => {
+        installPrepareStackTrace();
+        const modulesDir = path.join(local.dir, "modules");
+        const modules: Record<CanonicalizedModulePath, AnalyzedFunctions> = {};
+        // Module evaluation mutates process-global CommonJS shims and can run
+        // user initialization code, so analyzing modules in parallel is unsafe.
+        for (const modulePath of local.modules) {
+          try {
+            const filePath = path.join(modulesDir, modulePath);
+            modules[modulePath] = await analyzeModule(filePath, envHash);
+          } catch (e: unknown) {
+            return {
+              type: "error",
+              message: `Failed to analyze ${modulePath}: ${extractErrorMessage(e)}`,
+              frames: captureErrorFrames(e),
+            };
+          }
         }
-      }
 
-      return { type: "success", modules };
-    },
-  );
+        return { type: "success", modules };
+      },
+    );
+  } finally {
+    await packageLease.release();
+  }
 }
 
 type Visibility = { kind: "public" } | { kind: "internal" };
@@ -555,10 +605,17 @@ export type AnalyzedFunctions = Array<{
   returns: JSONValue | null;
 }>;
 
-async function analyzeModule(filePath: string): Promise<AnalyzedFunctions> {
+async function analyzeModule(
+  filePath: string,
+  envHash: string,
+): Promise<AnalyzedFunctions> {
   setupGlobals(filePath);
-  const fileUrl = pathToFileURL(filePath).href;
-  const module = await import(fileUrl);
+  const fileUrl = pathToFileURL(filePath);
+  fileUrl.searchParams.set("envHash", envHash);
+  // Analysis evaluates user initialization code. Keep its entry-module instance
+  // separate from execute while still invalidating it when the environment changes.
+  fileUrl.searchParams.set("phase", "analyze");
+  const module = await import(fileUrl.href);
 
   const functions: Map<
     string,
@@ -630,7 +687,7 @@ async function analyzeModule(filePath: string): Promise<AnalyzedFunctions> {
     }
 
     if (isPublic && isInternal) {
-      logDebug(`Skipping function marked as both public and internal: ${name}`);
+      logDebug("Skipping function marked as both public and internal");
       continue;
     } else if (isPublic) {
       functions.set(name, {
@@ -672,6 +729,7 @@ async function analyzeModule(filePath: string): Promise<AnalyzedFunctions> {
 }
 
 const globalSyscalls = new AsyncLocalStorage<Syscalls>();
+const globalResponseStream = new AsyncLocalStorage<Writable>();
 export const globalConsoleState = new AsyncLocalStorage<ConsoleState>();
 export const globalDevConsole = new AsyncLocalStorage<Console>();
 
