@@ -68,6 +68,29 @@ fn validate_usize_strict_nonzero(name: &str, value: usize) -> anyhow::Result<usi
     Ok(value)
 }
 
+fn env_config_duration_millis_strict(name: &str, default: usize) -> Duration {
+    let millis = env_config_usize_strict(name, default)
+        .try_into()
+        .unwrap_or_else(|_| panic!("Invalid value for {name}: milliseconds do not fit in u64"));
+    Duration::from_millis(millis)
+}
+
+fn env_config_bool_strict(name: &str, default: bool) -> bool {
+    let value = match std::env::var(name) {
+        Ok(var_s) => var_s
+            .parse::<bool>()
+            .unwrap_or_else(|e| panic!("Invalid value for {name}: {e:?}")),
+        Err(std::env::VarError::NotPresent) => default,
+        Err(std::env::VarError::NotUnicode(..)) => {
+            panic!("Invalid non-Unicode value for {name}")
+        },
+    };
+    if value != default {
+        tracing::info!("Overriding {name} to {value:?} from environment");
+    }
+    value
+}
+
 /// This exists solely to allow knobs to have separate defaults for local
 /// execution and prod (running in Nomad). Don't export this outside of
 /// this module. We assume that if we're running in Nomad, we're in production
@@ -932,59 +955,69 @@ pub static DATABASE_UDF_SYSTEM_TIMEOUT: LazyLock<Duration> =
 pub static ISOLATE_ANALYZE_USER_TIMEOUT: LazyLock<Duration> =
     LazyLock::new(|| Duration::from_secs(env_config("ISOLATE_ANALYZE_USER_TIMEOUT_SECONDS", 4)));
 
-fn env_config_isolate_scheduler_usize_strict(name: &str, default: usize) -> usize {
-    let value = match std::env::var(name) {
-        Ok(var_s) => var_s
-            .parse::<usize>()
-            .unwrap_or_else(|e| panic!("Invalid value for {name}: {e:?}")),
-        Err(std::env::VarError::NotPresent) => default,
-        Err(std::env::VarError::NotUnicode(..)) => {
-            panic!("Invalid non-Unicode value for {name}")
-        },
-    };
-    if value != default {
-        tracing::info!("Overriding {name} to {value:?} from environment");
-    }
-    value
-}
-
-/// Increasing the size of the queue helps us deal with bursty requests. This is
-/// a CoDel queue [https://queue.acm.org/detail.cfm?id=2209336], which will
-/// switch from FIFO to LIFO queue when overloaded, in order to process as much
-/// as possible and avoid a congestion collapse. The primary downside of
-/// increasing this is memory usage from the UDF arguments.
+/// Shared isolate queue capacity. The default policy uses generic CoDel. The
+/// strict opt-in lane-aware policy keeps FIFO ordering and applies its own
+/// delay controller. Both policies add dependency-only capacity configured by
+/// `ISOLATE_DEPENDENCY_WORKER_RESERVE`. Larger values retain more UDF arguments
+/// and can increase overload latency.
 pub static ISOLATE_QUEUE_SIZE: LazyLock<usize> =
-    LazyLock::new(|| env_config_isolate_scheduler_usize_strict("ISOLATE_QUEUE_SIZE", 2000));
-
-/// The maximum length of time to wait to start running a function when the
-/// isolate scheduler is idle.
-pub static ISOLATE_QUEUE_IDLE_TIMEOUT: LazyLock<Duration> =
-    LazyLock::new(|| Duration::from_millis(env_config("ISOLATE_QUEUE_IDLE_TIMEOUT_MS", 2000)));
-
-/// The maximum length of time to wait to start running a function when the
-/// isolate scheduler is "congested", according to the CoDel queue.
-pub static ISOLATE_QUEUE_CONGESTED_TIMEOUT: LazyLock<Duration> =
-    LazyLock::new(|| Duration::from_millis(env_config("ISOLATE_QUEUE_CONGESTED_TIMEOUT_MS", 200)));
+    LazyLock::new(|| env_config_usize_strict("ISOLATE_QUEUE_SIZE", 2000));
 
 /// Maximum number of isolate worker threads in a function runner process.
 /// For self-hosted tuning guidance, see
-/// patches/isolate_concurrency_knobs.md.
+/// patches/dependency_capacity/README.md.
 pub static MAX_ISOLATE_WORKERS: LazyLock<usize> =
-    LazyLock::new(|| env_config_isolate_scheduler_usize_strict("MAX_ISOLATE_WORKERS", 300));
+    LazyLock::new(|| env_config_usize_strict("MAX_ISOLATE_WORKERS", 300));
 
 /// Dependency-only worker overflow above shared base capacity. All request
 /// classes share `MAX_ISOLATE_WORKERS - ISOLATE_DEPENDENCY_WORKER_RESERVE`
 /// base slots; only requests unblocking an isolate-holding ancestor may raise
 /// total occupancy above that point. The isolate client validates that this is
 /// smaller than MAX_ISOLATE_WORKERS.
-pub static ISOLATE_DEPENDENCY_WORKER_RESERVE: LazyLock<usize> = LazyLock::new(|| {
-    env_config_isolate_scheduler_usize_strict("ISOLATE_DEPENDENCY_WORKER_RESERVE", 1)
-});
+pub static ISOLATE_DEPENDENCY_WORKER_RESERVE: LazyLock<usize> =
+    LazyLock::new(|| env_config_usize_strict("ISOLATE_DEPENDENCY_WORKER_RESERVE", 1));
 
 /// Maximum independent V8 and HTTP actions assigned to isolate workers. Zero
 /// derives the limit from shared base worker capacity.
 pub static MAX_ISOLATE_ACTION_WORKERS: LazyLock<usize> =
-    LazyLock::new(|| env_config_isolate_scheduler_usize_strict("MAX_ISOLATE_ACTION_WORKERS", 0));
+    LazyLock::new(|| env_config_usize_strict("MAX_ISOLATE_ACTION_WORKERS", 0));
+
+/// Enables the isolate scheduler's lane-aware queue delay controller. Disabled
+/// by default so the isolate scheduler retains the generic CoDel queue policy.
+pub static ISOLATE_QUEUE_DELAY_CONTROL_ENABLED: LazyLock<bool> =
+    LazyLock::new(|| env_config_bool_strict("ISOLATE_QUEUE_DELAY_CONTROL_ENABLED", false));
+
+/// Queueing-delay target for the isolate scheduler's lane-aware queue policy.
+/// This must be greater than zero.
+pub static ISOLATE_QUEUE_DELAY_TARGET_MILLIS: LazyLock<Duration> =
+    LazyLock::new(|| env_config_duration_millis_strict("ISOLATE_QUEUE_DELAY_TARGET_MILLIS", 150));
+
+/// Complete observation interval used by each isolate queue lane. This must be
+/// greater than zero.
+pub static ISOLATE_QUEUE_DELAY_INTERVAL_MILLIS: LazyLock<Duration> = LazyLock::new(|| {
+    env_config_duration_millis_strict("ISOLATE_QUEUE_DELAY_INTERVAL_MILLIS", 1000)
+});
+
+/// Hard maximum queue age for every lane under the lane-aware isolate queue
+/// policy. This must be greater than twice the queueing-delay target.
+pub static ISOLATE_QUEUE_HARD_MAX_AGE_MILLIS: LazyLock<Duration> =
+    LazyLock::new(|| env_config_duration_millis_strict("ISOLATE_QUEUE_HARD_MAX_AGE_MILLIS", 5000));
+
+/// Enables the control-plane lane for isolate module analysis and configuration
+/// evaluation requests. This requires the lane-aware queue policy.
+pub static ISOLATE_CONTROL_PLANE_LANE_ENABLED: LazyLock<bool> =
+    LazyLock::new(|| env_config_bool_strict("ISOLATE_CONTROL_PLANE_LANE_ENABLED", false));
+
+/// Maximum queued control-plane requests. This is a sub-cap inside
+/// `ISOLATE_QUEUE_SIZE`, not reserved capacity.
+pub static ISOLATE_CONTROL_PLANE_QUEUE_CAPACITY: LazyLock<usize> =
+    LazyLock::new(|| env_config_usize_strict("ISOLATE_CONTROL_PLANE_QUEUE_CAPACITY", 16));
+
+/// Hard maximum queue age for control-plane requests when their lane is
+/// enabled. This must be longer than the ordinary lane's hard maximum age.
+pub static ISOLATE_CONTROL_PLANE_HARD_MAX_AGE_MILLIS: LazyLock<Duration> = LazyLock::new(|| {
+    env_config_duration_millis_strict("ISOLATE_CONTROL_PLANE_HARD_MAX_AGE_MILLIS", 30000)
+});
 
 /// The size of the pending commits in the committer queue. This is a FIFO
 /// queue, so if the queue is too large, we run into a risk of all requests
@@ -1121,9 +1154,10 @@ pub static APPLICATION_MAX_CONCURRENT_UPLOADS: LazyLock<usize> =
 
 /// The number of modules to analyze concurrently during a push.
 ///
-/// This only applies to isolate modules, not node ones.
+/// This only applies to isolate modules, not node ones. The isolate client
+/// validates that this is greater than zero.
 pub static ANALYZE_CONCURRENCY: LazyLock<usize> =
-    LazyLock::new(|| env_config("ANALYZE_CONCURRENCY", 4));
+    LazyLock::new(|| env_config_usize_strict("ANALYZE_CONCURRENCY", 4));
 
 /// Set a 64MB limit on the heap size.
 pub static ISOLATE_MAX_USER_HEAP_SIZE: LazyLock<usize> =
@@ -1391,9 +1425,9 @@ pub static TICKETMASTER_CLUSTER_NAME: LazyLock<String> =
 
 /// The maximum number of CPU cores that can be used simultaneously by the
 /// isolates. Zero means no limit. For self-hosted tuning guidance, see
-/// patches/isolate_concurrency_knobs.md.
+/// patches/dependency_capacity/README.md.
 pub static FUNRUN_ISOLATE_ACTIVE_THREADS: LazyLock<usize> =
-    LazyLock::new(|| env_config_isolate_scheduler_usize_strict("FUNRUN_ISOLATE_ACTIVE_THREADS", 0));
+    LazyLock::new(|| env_config_usize_strict("FUNRUN_ISOLATE_ACTIVE_THREADS", 0));
 
 /// Isolate worker usage at which the funrun load reporter's
 /// `effective_load` saturates to 1.0.
