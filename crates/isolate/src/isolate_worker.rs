@@ -74,7 +74,8 @@ impl<RT: Runtime> FunctionRunnerIsolateWorker<RT> {
             RequestType::Udf {
                 request,
                 environment_data,
-                mut response,
+                cancellation,
+                response,
                 queue_timer,
                 rng_seed,
                 reactor_depth,
@@ -101,7 +102,7 @@ impl<RT: Runtime> FunctionRunnerIsolateWorker<RT> {
                         context_cache,
                         permit,
                         &mut isolate_clean,
-                        response.closed().boxed(),
+                        cancellation,
                         args,
                         function_started_sender,
                         udf_callback,

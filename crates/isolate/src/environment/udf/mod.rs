@@ -7,7 +7,6 @@ use common::{
     },
     components::{
         CanonicalizedComponentFunctionPath,
-        CanonicalizedComponentModulePath,
         ResolvedComponentFunctionPath,
     },
     document::{
@@ -17,13 +16,6 @@ use common::{
     errors::report_error_sync,
     execution_context::ExecutionContext,
     knobs::ISOLATE_MAX_USER_HEAP_SIZE,
-};
-use futures::{
-    future::{
-        self,
-        BoxFuture,
-    },
-    FutureExt,
 };
 use itertools::Either;
 use model::{
@@ -51,6 +43,7 @@ use udf::{
 
 use crate::{
     context_cache::{
+        context_cache_key,
         ContextCache,
         ContextReadSet,
     },
@@ -164,6 +157,7 @@ use self::{
 use super::ModuleCodeCacheResult;
 use crate::{
     client::{
+        CancellationSignal,
         EnvironmentData,
         SharedIsolateHeapStats,
         UdfCallback,
@@ -365,6 +359,7 @@ type UdfRecursiveExecutor<RT> = RecursiveExecutor<
         anyhow::Result<Result<PendingValue, JsError>>,
     )>,
 >;
+
 struct RunUdf<'a, 'b, RT: Runtime> {
     rt: &'a RT,
     v8_scope: &'a mut v8::Isolate,
@@ -373,6 +368,7 @@ struct RunUdf<'a, 'b, RT: Runtime> {
     isolate_handle: &'a IsolateHandle,
     executor: &'a UdfRecursiveExecutor<RT>,
     heap_stats: &'a SharedIsolateHeapStats,
+    cancellation: CancellationSignal,
 }
 
 impl<'a, 'b, RT: Runtime> UdfCallback<RT> for RunUdf<'a, 'b, RT> {
@@ -393,9 +389,10 @@ impl<'a, 'b, RT: Runtime> UdfCallback<RT> for RunUdf<'a, 'b, RT> {
             client_id,
             rng_seed,
         );
-        // it is not necessary to propagate cancellation as the parent will already
-        // cancel the entire tree of futures.
-        let cancellation = future::pending().boxed();
+        // Same-isolate nested JavaScript can complete synchronously before the parent
+        // select repolls cancellation, so its context-save boundary needs the shared
+        // caller-drop signal too.
+        let cancellation = self.cancellation;
         // N.B.: `run_nested` calls the corresponding `pop_context`.
         // This may not happen in case of a system error, but in that case we
         // are going to throw away the entire context stack anyway.
@@ -470,7 +467,7 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
         client_id: String,
         rng_seed: [u8; 32],
     ) -> (Self, DatabaseUdfArgs) {
-        let reuse_context = path_and_args.reuse_context();
+        let reuse_context = path_and_args.reuse_context(udf_type);
         let (path, arguments, udf_server_version) = path_and_args.consume();
         let component = path.component;
         let identity = transaction.inert_identity();
@@ -525,7 +522,7 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
         context_cache: &mut ContextCache,
         permit: ConcurrencyPermit,
         isolate_clean: &mut bool,
-        cancellation: BoxFuture<'_, ()>,
+        cancellation: CancellationSignal,
         args: DatabaseUdfArgs,
         function_started: Option<oneshot::Sender<()>>,
         udf_callback: Option<IsolateClient<RT>>,
@@ -632,7 +629,7 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
         mut request_state: RequestState<RT, Self>,
         timeout: &mut Timeout<RT>,
         isolate_clean: &mut bool,
-        cancellation: BoxFuture<'_, ()>,
+        cancellation: CancellationSignal,
         udf_callback: Option<IsolateClient<RT>>,
     ) -> anyhow::Result<(Self, anyhow::Result<Result<PendingValue, JsError>>)> {
         scope!(let handle_scope, isolate);
@@ -707,7 +704,7 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
                         &mut *v8_scope,
                         context_cache,
                         timeout,
-                        cancellation,
+                        &cancellation,
                         args,
                         module,
                         udf_callback,
@@ -723,6 +720,12 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
         // to ensure the microtask queue is empty. Otherwise, JS from this request may
         // leak to a subsequent one on isolate reuse.
         isolate_context.checkpoint();
+        // The final checkpoint can run user code and trigger termination after
+        // `run_inner` performed its last check. Preserve that failure through the
+        // context-save gate; the top-level request will extract the specific error.
+        if let Err(e) = isolate_handle.check_terminated() {
+            result = Err(e);
+        }
         *isolate_clean = true;
 
         let request_state = isolate_context.take_state().context("Lost RequestState?")?;
@@ -733,8 +736,19 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
             Err(e) => result = Ok(Err(e)),
         }
 
-        // Only reuse contexts if the execution was successful, in case
-        // there are any promises hanging around
+        // Database UDFs do not poll cancellation while synchronous JavaScript runs.
+        // Check again at the save boundary so a dropped caller cannot retain the
+        // context of an execution whose result it will never receive.
+        if args.reuse_context
+            && context_read_set.is_some()
+            && matches!(result, Ok(Ok(_)))
+            && cancellation.is_cancelled()
+        {
+            log_isolate_request_cancelled();
+            result = Err(anyhow!("Cancelled"));
+        }
+
+        // Only reuse contexts after successful isolate execution.
         if args.reuse_context
             && let Ok(Ok(_)) = result
             && let Some(read_set) = context_read_set
@@ -745,10 +759,7 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
             let v8_scope = isolate_context.scope();
             let context = v8_scope.get_current_context();
             context_cache.save_context(
-                CanonicalizedComponentModulePath {
-                    component: this.path.component,
-                    module_path: this.path.udf_path.module().clone(),
-                },
+                context_cache_key(&this.path),
                 v8::Global::new(v8_scope, context),
                 module_map,
                 read_set,
@@ -819,7 +830,7 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
         v8_scope: &mut v8::PinScope<'_, '_>,
         context_cache: &mut ContextCache,
         timeout: &mut Timeout<RT>,
-        cancellation: BoxFuture<'_, ()>,
+        cancellation: &CancellationSignal,
         args: &DatabaseUdfArgs,
         module: v8::Local<'_, v8::Module>,
         udf_callback: Option<IsolateClient<RT>>,
@@ -947,7 +958,6 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
             Ok(None) => anyhow::bail!("Successful invocation returned None"),
             Err(e) => return Ok(Err(e)),
         };
-        let mut cancellation = cancellation;
         loop {
             // Advance the user's promise as far as it can go by draining the microtask
             // queue.
@@ -1036,6 +1046,7 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
                                 isolate_handle: handle,
                                 executor,
                                 heap_stats: &heap_stats,
+                                cancellation: (*cancellation).clone(),
                             };
                             let udf_callback = if let Some(callback) = &udf_callback {
                                 Either::Left(callback)
@@ -1044,7 +1055,7 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
                             };
                             select! {
                                 biased;
-                                _ = &mut cancellation => {
+                                _ = cancellation.cancelled() => {
                                     log_isolate_request_cancelled();
                                     anyhow::bail!("Cancelled");
                                 },
@@ -1353,10 +1364,7 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
         &mut self,
         context_cache: &mut ContextCache,
     ) -> anyhow::Result<Option<(v8::Global<v8::Context>, ModuleMap, ContextReadSet)>> {
-        let module_path = CanonicalizedComponentModulePath {
-            component: self.path.component,
-            module_path: self.path.udf_path.module().clone(),
-        };
+        let module_path = context_cache_key(&self.path);
         let Some((context, module_map, read_set)) = context_cache.take_reused_context(&module_path)
         else {
             return Ok(None);
