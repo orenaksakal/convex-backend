@@ -185,6 +185,7 @@ use crate::{
     metrics::{
         self,
         log_isolate_request_cancelled,
+        DatabaseUdfContextReuseLookupOutcome,
     },
     request_scope::{
         RequestScope,
@@ -1367,11 +1368,39 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
         let module_path = context_cache_key(&self.path);
         let Some((context, module_map, read_set)) = context_cache.take_reused_context(&module_path)
         else {
+            metrics::log_database_udf_context_reuse_lookup(
+                self.udf_type,
+                DatabaseUdfContextReuseLookupOutcome::NotFound,
+            );
             return Ok(None);
         };
-        let tx = self.phase.tx_mut()?;
-        if !ContextCache::validate_and_apply_context_read_set(tx, &read_set).await? {
-            return Ok(None);
+        // A found context has one terminal lookup outcome even if broken request
+        // transaction state prevents read-set validation from starting.
+        let validation_result = match self.phase.tx_mut() {
+            Ok(tx) => ContextCache::validate_and_apply_context_read_set(tx, &read_set).await,
+            Err(error) => Err(error),
+        };
+        match validation_result {
+            Ok(true) => {
+                metrics::log_database_udf_context_reuse_lookup(
+                    self.udf_type,
+                    DatabaseUdfContextReuseLookupOutcome::Hit,
+                );
+            },
+            Ok(false) => {
+                metrics::log_database_udf_context_reuse_lookup(
+                    self.udf_type,
+                    DatabaseUdfContextReuseLookupOutcome::ValidationFailed,
+                );
+                return Ok(None);
+            },
+            Err(error) => {
+                metrics::log_database_udf_context_reuse_lookup(
+                    self.udf_type,
+                    DatabaseUdfContextReuseLookupOutcome::ValidationError,
+                );
+                return Err(error);
+            },
         }
         Ok(Some((context, module_map, read_set)))
     }

@@ -22,7 +22,10 @@ use crate::{
         SharedIsolateHeapStats,
         PAUSE_REQUEST,
     },
-    context_cache::ContextCache,
+    context_cache::{
+        ContextCache,
+        ContextCacheClearReason,
+    },
     environment::{
         action::ActionEnvironment,
         analyze::AnalyzeEnvironment,
@@ -319,7 +322,7 @@ impl<RT: Runtime> FunctionRunnerIsolateWorker<RT> {
                 // AppDefinitionEvaluator doesn't use the prewarmed V8 context
                 // because it uses an arbitrary number of contexts. This call is
                 // rare and not particularly latency-sensitive though
-                context_cache.clear();
+                context_cache.clear(ContextCacheClearReason::AppDefinitionEvaluation);
                 let env = AppDefinitionEvaluator::new(
                     app_definition,
                     component_definitions,
