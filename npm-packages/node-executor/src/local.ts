@@ -22,20 +22,17 @@ async function startServer(
   // Override os.tmpdir to use the provided tempdir
   os.tmpdir = () => tempdir;
   log("Node executor tempdir configured");
-  let activeRequests = 0;
 
   // Add health check endpoint
   app.get("/health", (_req: Request, res: Response) => {
     res.json({
       status: "ok",
-      activeRequests,
       packageCache: getPackageCacheStats(),
       stackTrace: getPrepareStackTraceStats(),
     });
   });
 
   app.post("/invoke", async (req: Request, res: Response) => {
-    activeRequests += 1;
     try {
       const request = req.body;
       request.requestId = uuidv4();
@@ -63,7 +60,6 @@ async function startServer(
         );
       }
     } finally {
-      activeRequests -= 1;
       res.end();
     }
   });
