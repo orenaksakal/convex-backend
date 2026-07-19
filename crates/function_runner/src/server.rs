@@ -25,6 +25,7 @@ use common::{
     },
     knobs::MAX_ISOLATE_WORKERS,
     log_lines::LogLine,
+    memory_pressure::MemoryPressureSignal,
     persistence::RetentionValidator,
     query_journal::QueryJournal,
     runtime::{
@@ -288,7 +289,27 @@ pub async fn validate_run_function_result(
 
 impl<RT: Runtime, S: StorageForDeployment<RT>> FunctionRunnerCore<RT, S> {
     pub fn new(rt: RT, storage: S, max_percent_per_client: usize) -> anyhow::Result<Self> {
-        Self::_new(rt, storage, max_percent_per_client, *MAX_ISOLATE_WORKERS)
+        Self::new_with_memory_pressure(
+            rt,
+            storage,
+            max_percent_per_client,
+            MemoryPressureSignal::default(),
+        )
+    }
+
+    pub fn new_with_memory_pressure(
+        rt: RT,
+        storage: S,
+        max_percent_per_client: usize,
+        memory_pressure: MemoryPressureSignal,
+    ) -> anyhow::Result<Self> {
+        Self::_new(
+            rt,
+            storage,
+            max_percent_per_client,
+            *MAX_ISOLATE_WORKERS,
+            memory_pressure,
+        )
     }
 
     fn _new(
@@ -296,12 +317,14 @@ impl<RT: Runtime, S: StorageForDeployment<RT>> FunctionRunnerCore<RT, S> {
         storage: S,
         max_percent_per_client: usize,
         max_isolate_workers: usize,
+        memory_pressure: MemoryPressureSignal,
     ) -> anyhow::Result<Self> {
-        let isolate_client = IsolateClient::new(
+        let isolate_client = IsolateClient::new_with_memory_pressure(
             rt.clone(),
             max_percent_per_client,
             max_isolate_workers,
             None,
+            memory_pressure,
         )?;
         let index_cache = InMemoryIndexCache::new(rt.clone());
         let module_cache = ModuleCache::new(rt.clone());

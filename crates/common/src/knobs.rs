@@ -68,7 +68,7 @@ fn validate_usize_strict_nonzero(name: &str, value: usize) -> anyhow::Result<usi
     Ok(value)
 }
 
-fn env_config_optional_usize_strict_nonzero(name: &str) -> Option<usize> {
+fn env_config_optional_usize_strict(name: &str) -> Option<usize> {
     let value = match std::env::var(name) {
         Ok(var_s) => Some(parse_usize_strict(name, &var_s).unwrap_or_else(|e| panic!("{e}"))),
         Err(std::env::VarError::NotPresent) => None,
@@ -77,12 +77,6 @@ fn env_config_optional_usize_strict_nonzero(name: &str) -> Option<usize> {
         },
     };
     if let Some(value) = value {
-        assert!(value > 0, "{name} must be greater than zero");
-        assert!(
-            value <= tokio::sync::Semaphore::MAX_PERMITS,
-            "{name} must not exceed {}",
-            tokio::sync::Semaphore::MAX_PERMITS,
-        );
         tracing::info!("Overriding {name} to {value:?} from environment");
     }
     value
@@ -1230,10 +1224,34 @@ pub static REUSE_ISOLATES: LazyLock<bool> = LazyLock::new(|| env_config("REUSE_I
 
 /// If true, HTTP actions may reuse a V8 context with an already-evaluated HTTP
 /// router module. This is off by default because it preserves module-level JS
-/// state across HTTP action requests. See patches/reuse_http_action_contexts.md
-/// for the self-hosted tradeoff.
+/// state across HTTP action requests. See
+/// patches/reuse_http_action_contexts/README.md for the self-hosted tradeoff.
 pub static REUSE_HTTP_ACTION_CONTEXTS: LazyLock<bool> =
     LazyLock::new(|| env_config("REUSE_HTTP_ACTION_CONTEXTS", false));
+
+/// Number of frequency-protected reusable V8 contexts retained by each isolate
+/// context cache. The cache also has one probationary resident. Keep at least
+/// two protected residents so cgroup pressure can preserve its two hottest
+/// entries without increasing the configured normal capacity.
+pub static ISOLATE_CONTEXT_CACHE_PROTECTED_RESIDENTS_PER_ISOLATE: LazyLock<usize> =
+    LazyLock::new(|| {
+        let value = env_config_usize_strict_nonzero(
+            "ISOLATE_CONTEXT_CACHE_PROTECTED_RESIDENTS_PER_ISOLATE",
+            5,
+        );
+        assert!(
+            value >= 2,
+            "ISOLATE_CONTEXT_CACHE_PROTECTED_RESIDENTS_PER_ISOLATE must be at least 2"
+        );
+        value
+    });
+
+/// Optional scheduler-wide hard limit on reusable V8 contexts retained by the
+/// isolate context caches. When unset, the isolate scheduler derives the
+/// structural maximum from its worker count and per-isolate cache capacity. A
+/// configured value must be positive and cannot exceed that structural maximum.
+pub static ISOLATE_CONTEXT_CACHE_MAX_RESIDENTS: LazyLock<Option<usize>> =
+    LazyLock::new(|| env_config_optional_usize_strict("ISOLATE_CONTEXT_CACHE_MAX_RESIDENTS"));
 
 /// Duration in seconds before an idle isolate is recreated
 pub static ISOLATE_IDLE_TIMEOUT: LazyLock<Duration> =
@@ -1306,9 +1324,8 @@ pub static APPLICATION_MAX_CONCURRENT_QUERIES: LazyLock<usize> = LazyLock::new(|
 /// active-JavaScript gates.
 pub static APPLICATION_MAX_CONCURRENT_DEGRADABLE_QUERY_LEADERS: LazyLock<Option<usize>> =
     LazyLock::new(|| {
-        let capacity = env_config_optional_usize_strict_nonzero(
-            "APPLICATION_MAX_CONCURRENT_DEGRADABLE_QUERY_LEADERS",
-        );
+        let capacity =
+            env_config_optional_usize_strict("APPLICATION_MAX_CONCURRENT_DEGRADABLE_QUERY_LEADERS");
         if let Some(capacity) = capacity {
             validate_degradable_query_leader_capacity(
                 capacity,

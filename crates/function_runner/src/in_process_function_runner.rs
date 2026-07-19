@@ -22,8 +22,12 @@ use common::{
     errors::JsError,
     execution_context::ExecutionContext,
     http::fetch::FetchClient,
-    knobs::SUBFUNCTIONS_IN_SAME_ISOLATE,
+    knobs::{
+        MAX_ISOLATE_WORKERS,
+        SUBFUNCTIONS_IN_SAME_ISOLATE,
+    },
     log_lines::LogLine,
+    memory_pressure::MemoryPressureSignal,
     persistence::{
         PersistenceReader,
         RepeatablePersistence,
@@ -53,6 +57,7 @@ use futures::{
     FutureExt,
     StreamExt,
 };
+use isolate::IsolateClient;
 use keybroker::{
     FunctionRunnerKeyBroker,
     Identity,
@@ -117,6 +122,11 @@ pub struct InProcessFunctionRunner<RT: Runtime> {
 }
 
 impl<RT: Runtime> InProcessFunctionRunner<RT> {
+    pub fn preflight_context_cache_configuration() -> anyhow::Result<()> {
+        let _ = IsolateClient::<RT>::preflight_context_cache_capacity(*MAX_ISOLATE_WORKERS)?;
+        Ok(())
+    }
+
     pub fn new(
         deployment: DeploymentMetadata,
         keybroker: FunctionRunnerKeyBroker,
@@ -127,9 +137,38 @@ impl<RT: Runtime> InProcessFunctionRunner<RT> {
         database: Database<RT>,
         fetch_client: Arc<dyn FetchClient>,
     ) -> anyhow::Result<Self> {
+        Self::new_with_memory_pressure(
+            deployment,
+            keybroker,
+            convex_origin,
+            rt,
+            persistence_reader,
+            storage,
+            database,
+            fetch_client,
+            MemoryPressureSignal::default(),
+        )
+    }
+
+    pub fn new_with_memory_pressure(
+        deployment: DeploymentMetadata,
+        keybroker: FunctionRunnerKeyBroker,
+        convex_origin: ConvexOrigin,
+        rt: RT,
+        persistence_reader: Arc<dyn PersistenceReader>,
+        storage: DeploymentStorage,
+        database: Database<RT>,
+        fetch_client: Arc<dyn FetchClient>,
+        memory_pressure: MemoryPressureSignal,
+    ) -> anyhow::Result<Self> {
         // InProcessFunrun is single tenant and thus can use the full capacity.
         let max_percent_per_client = 100;
-        let server = FunctionRunnerCore::new(rt, storage, max_percent_per_client)?;
+        let server = FunctionRunnerCore::new_with_memory_pressure(
+            rt,
+            storage,
+            max_percent_per_client,
+            memory_pressure,
+        )?;
         Ok(Self {
             server,
             persistence_reader,

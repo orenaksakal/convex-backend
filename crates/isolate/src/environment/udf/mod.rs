@@ -7,6 +7,7 @@ use common::{
     },
     components::{
         CanonicalizedComponentFunctionPath,
+        CanonicalizedComponentModulePath,
         ResolvedComponentFunctionPath,
     },
     document::{
@@ -46,6 +47,8 @@ use crate::{
         context_cache_key,
         ContextCache,
         ContextReadSet,
+        ReusableContextToken,
+        TakenContext,
     },
     environment::udf::astral_future::RecursiveExecutor,
     module_cache::V8ModuleSource,
@@ -275,14 +278,18 @@ impl<RT: Runtime> IsolateEnvironment<RT> for DatabaseUdfEnvironment<RT> {
             // start of execution and doesn't observe elapsed time.
             UdfType::Query => self.phase.performance_now_fixed(),
             UdfType::Mutation => self.phase.performance_now_incrementing(),
-            _ => anyhow::bail!("Expected a query or mutation"),
+            UdfType::Action | UdfType::HttpAction => {
+                anyhow::bail!("Expected a query or mutation")
+            },
         }
     }
 
     fn performance_time_origin(&mut self) -> anyhow::Result<UnixTimestamp> {
         match self.udf_type {
             UdfType::Query | UdfType::Mutation => self.phase.performance_time_origin(),
-            _ => anyhow::bail!("Expected a query or mutation"),
+            UdfType::Action | UdfType::HttpAction => {
+                anyhow::bail!("Expected a query or mutation")
+            },
         }
     }
 
@@ -358,8 +365,46 @@ type UdfRecursiveExecutor<RT> = RecursiveExecutor<
     anyhow::Result<(
         DatabaseUdfEnvironment<RT>,
         anyhow::Result<Result<PendingValue, JsError>>,
+        Option<PendingReusableContext>,
     )>,
 >;
+
+struct PendingReusableContext {
+    module_path: CanonicalizedComponentModulePath,
+    context: v8::Global<v8::Context>,
+    module_map: ModuleMap,
+    read_set: ContextReadSet,
+    // Keep the token after the V8 roots so failed outer finalization releases
+    // shared capacity only after those roots are destroyed.
+    token: Option<ReusableContextToken>,
+}
+
+impl PendingReusableContext {
+    fn publish(
+        self,
+        context_cache: &mut ContextCache,
+        cancellation: &CancellationSignal,
+        isolate_handle: &IsolateHandle,
+    ) -> anyhow::Result<()> {
+        // Keep the V8 root and any pool token carried by a hit private until local
+        // result and transaction finalization have both succeeded. There is no
+        // await between these final request-state checks and cache publication.
+        isolate_handle.check_terminated()?;
+        if cancellation.is_cancelled() {
+            log_isolate_request_cancelled();
+            anyhow::bail!("Cancelled");
+        }
+        let Self {
+            module_path,
+            context,
+            module_map,
+            read_set,
+            token,
+        } = self;
+        context_cache.save_context(module_path, context, module_map, read_set, token);
+        Ok(())
+    }
+}
 
 struct RunUdf<'a, 'b, RT: Runtime> {
     rt: &'a RT,
@@ -393,7 +438,7 @@ impl<'a, 'b, RT: Runtime> UdfCallback<RT> for RunUdf<'a, 'b, RT> {
         // Same-isolate nested JavaScript can complete synchronously before the parent
         // select repolls cancellation, so its context-save boundary needs the shared
         // caller-drop signal too.
-        let cancellation = self.cancellation;
+        let cancellation = self.cancellation.clone();
         // N.B.: `run_nested` calls the corresponding `pop_context`.
         // This may not happen in case of a system error, but in that case we
         // are going to throw away the entire context stack anyway.
@@ -404,24 +449,26 @@ impl<'a, 'b, RT: Runtime> UdfCallback<RT> for RunUdf<'a, 'b, RT> {
         // User code is going to run again; regain the concurrency permit.
         let mut unpause_guard = self.paused_timeout.regain().await?;
         // Actually run the UDF.
-        let future = DatabaseUdfEnvironment::<RT>::run_nested(
-            self.executor,
-            &args,
-            self.v8_scope,
-            self.context_cache,
-            self.isolate_handle.clone(),
-            request_state,
-            &mut *unpause_guard,
-            &mut isolate_clean,
-            cancellation,
-            None, /* udf_callback */
-        );
-        // Use an AstralFuture to move the responsibility of polling `future`
-        // to the `RecursiveExecutor` (created by DatabaseUdfEnvironment::run()).
-        // This avoids creating a deep stack of recursive `run_udf` calls.
-        let body = std::pin::pin!(AstralBody::new(future));
-        // safety: this future must not be leaked
-        let (nested_provider, result) = self.executor.spawn(unsafe { body.project() }).await??;
+        let (nested_provider, result, reusable_context) = {
+            let future = DatabaseUdfEnvironment::<RT>::run_nested(
+                self.executor,
+                &args,
+                self.v8_scope,
+                self.context_cache,
+                self.isolate_handle.clone(),
+                request_state,
+                &mut *unpause_guard,
+                &mut isolate_clean,
+                cancellation,
+                None, /* udf_callback */
+            );
+            // Use an AstralFuture to move the responsibility of polling `future`
+            // to the `RecursiveExecutor` (created by DatabaseUdfEnvironment::run()).
+            // This avoids creating a deep stack of recursive `run_udf` calls.
+            let body = std::pin::pin!(AstralBody::new(future));
+            // safety: this future must not be leaked
+            self.executor.spawn(unsafe { body.project() }).await??
+        };
         let outcome = NestedUdfOutcome {
             observed_identity: nested_provider.phase.observed_identity(),
             observed_rng: nested_provider.phase.observed_rng(),
@@ -432,7 +479,15 @@ impl<'a, 'b, RT: Runtime> UdfCallback<RT> for RunUdf<'a, 'b, RT> {
             result: result?,
             syscall_trace: nested_provider.syscall_trace,
         };
-        Ok((nested_provider.phase.into_transaction()?, outcome))
+        let transaction = nested_provider.phase.into_transaction()?;
+        if let Some(reusable_context) = reusable_context {
+            reusable_context.publish(
+                self.context_cache,
+                &self.cancellation,
+                self.isolate_handle,
+            )?;
+        }
+        Ok((transaction, outcome))
     }
 }
 
@@ -539,7 +594,7 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
             // reject the function for capacity reasons.
             _ = tx.send(());
         }
-        let (this, mut result) = executor
+        let (this, mut result, reusable_context) = executor
             .run_until(Self::run_nested(
                 &executor,
                 &args,
@@ -549,7 +604,7 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
                 state,
                 &mut timeout,
                 isolate_clean,
-                cancellation,
+                cancellation.clone(),
                 udf_callback,
             ))
             .await?;
@@ -565,6 +620,11 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
             Err(e) => result = Err(e),
         }
         let result = result?;
+        let reusable_context = if result.is_ok() {
+            reusable_context
+        } else {
+            None
+        };
 
         let execution_time = timeout.into_function_execution_time(this.udf_type);
         let user_execution_time = execution_time.elapsed;
@@ -615,9 +675,15 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
         let outcome = match this.udf_type {
             UdfType::Query => FunctionOutcome::Query(outcome),
             UdfType::Mutation => FunctionOutcome::Mutation(outcome),
-            _ => anyhow::bail!("UdfEnvironment should only run queries and mutations"),
+            UdfType::Action | UdfType::HttpAction => {
+                anyhow::bail!("UdfEnvironment should only run queries and mutations")
+            },
         };
-        Ok((this.phase.into_transaction()?, outcome))
+        let transaction = this.phase.into_transaction()?;
+        if let Some(reusable_context) = reusable_context {
+            reusable_context.publish(context_cache, &cancellation, &handle)?;
+        }
+        Ok((transaction, outcome))
     }
 
     /// Runs a query or mutation, possibly nested via `runQuery`/`runMutation`.
@@ -632,15 +698,24 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
         isolate_clean: &mut bool,
         cancellation: CancellationSignal,
         udf_callback: Option<IsolateClient<RT>>,
-    ) -> anyhow::Result<(Self, anyhow::Result<Result<PendingValue, JsError>>)> {
+    ) -> anyhow::Result<(
+        Self,
+        anyhow::Result<Result<PendingValue, JsError>>,
+        Option<PendingReusableContext>,
+    )> {
+        // Declare token ownership before the V8 scopes so failure paths drop the
+        // active context and module roots before returning the pool permit.
+        let mut reusable_context_token = None;
         scope!(let handle_scope, isolate);
         let mut context_scope;
         let (mut isolate_context, mut context_read_set) = if args.reuse_context
-            && let Some((context, module_map, read_set)) = request_state
+            && let Some(taken_context) = request_state
                 .environment
-                .take_and_validate_reused_context(context_cache)
+                .take_and_validate_reused_context(context_cache, timeout)
                 .await?
         {
+            let (context, module_map, read_set, token) = taken_context.into_parts();
+            reusable_context_token = Some(token);
             let v8_context = v8::Local::new(handle_scope, context);
             context_scope = v8::ContextScope::new(handle_scope, v8_context);
             (
@@ -688,11 +763,17 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
                     let mut scope = RequestScope::<RT, Self>::enter(v8_scope);
                     let read_set = scope.state_mut()?.environment.phase.finish_snoop()?;
                     if let Ok(Ok(_)) = initialize_result {
-                        context_read_set = ContextCache::capture_context_read_set(
-                            read_set,
-                            scope.state_mut()?.environment.phase.tx_mut()?,
-                        )
-                        .await?;
+                        // Read-set hashing is the final system-owned part of
+                        // initialization, even though module evaluation has completed.
+                        context_read_set = timeout
+                            .with_release_permit(
+                                PauseReason::UdfInitialize,
+                                ContextCache::capture_context_read_set(
+                                    read_set,
+                                    scope.state_mut()?.environment.phase.tx_mut()?,
+                                ),
+                            )
+                            .await?;
                     }
                 }
                 initialize_result
@@ -749,8 +830,9 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
             result = Err(anyhow!("Cancelled"));
         }
 
-        // Only reuse contexts after successful isolate execution.
-        if args.reuse_context
+        // Hold a successful candidate out of the scheduler mirror until the caller
+        // finishes its fallible local outcome and transaction extraction.
+        let reusable_context = if args.reuse_context
             && let Ok(Ok(_)) = result
             && let Some(read_set) = context_read_set
         {
@@ -759,15 +841,18 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
                 .context("Lost ModuleMap?")?;
             let v8_scope = isolate_context.scope();
             let context = v8_scope.get_current_context();
-            context_cache.save_context(
-                context_cache_key(&this.path),
-                v8::Global::new(v8_scope, context),
+            Some(PendingReusableContext {
+                module_path: context_cache_key(&this.path),
+                context: v8::Global::new(v8_scope, context),
                 module_map,
                 read_set,
-            );
-        }
+                token: reusable_context_token.take(),
+            })
+        } else {
+            None
+        };
 
-        Ok((this, result))
+        Ok((this, result, reusable_context))
     }
 
     #[fastrace::trace(properties = {"reusable_context": "{reusable_context}", "is_reused": "{is_reused}"})]
@@ -1364,10 +1449,10 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
     async fn take_and_validate_reused_context(
         &mut self,
         context_cache: &mut ContextCache,
-    ) -> anyhow::Result<Option<(v8::Global<v8::Context>, ModuleMap, ContextReadSet)>> {
+        timeout: &mut Timeout<RT>,
+    ) -> anyhow::Result<Option<TakenContext>> {
         let module_path = context_cache_key(&self.path);
-        let Some((context, module_map, read_set)) = context_cache.take_reused_context(&module_path)
-        else {
+        let Some(taken_context) = context_cache.take_reused_context(&module_path) else {
             metrics::log_database_udf_context_reuse_lookup(
                 self.udf_type,
                 DatabaseUdfContextReuseLookupOutcome::NotFound,
@@ -1376,8 +1461,21 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
         };
         // A found context has one terminal lookup outcome even if broken request
         // transaction state prevents read-set validation from starting.
+        // Validation hashing is initialization work. If the future blocks,
+        // `with_release_permit` releases the active-JavaScript permit and excludes
+        // only that blocked interval from the user timeout.
         let validation_result = match self.phase.tx_mut() {
-            Ok(tx) => ContextCache::validate_and_apply_context_read_set(tx, &read_set).await,
+            Ok(tx) => {
+                timeout
+                    .with_release_permit(
+                        PauseReason::UdfInitialize,
+                        ContextCache::validate_and_apply_context_read_set(
+                            tx,
+                            taken_context.read_set(),
+                        ),
+                    )
+                    .await
+            },
             Err(error) => Err(error),
         };
         match validation_result {
@@ -1402,6 +1500,6 @@ impl<RT: Runtime> DatabaseUdfEnvironment<RT> {
                 return Err(error);
             },
         }
-        Ok(Some((context, module_map, read_set)))
+        Ok(Some(taken_context))
     }
 }
