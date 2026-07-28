@@ -5834,6 +5834,7 @@ dependencies = [
  "indexing",
  "jsonschema",
  "keybroker",
+ "libc",
  "maplit",
  "metrics",
  "model",
