@@ -817,6 +817,27 @@ pub struct LocalDirStorage<RT: Runtime> {
     _temp_dir: Option<Arc<TempDir>>,
 }
 
+fn local_object_attributes(path: &Path) -> anyhow::Result<Option<ObjectAttributes>> {
+    // Keep the existing missing/unopenable-object behavior, but ask the file
+    // descriptor for metadata instead of allocating and reading the complete
+    // object merely to determine its length.
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(_) => return Ok(None),
+    };
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("Local dir storage couldn't stat {}", path.display()))?;
+    anyhow::ensure!(
+        metadata.is_file(),
+        "Local dir storage object is not a file: {}",
+        path.display()
+    );
+    Ok(Some(ObjectAttributes {
+        size: metadata.len(),
+    }))
+}
+
 impl<RT: Runtime> std::fmt::Debug for LocalDirStorage<RT> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LocalDirStorage")
@@ -1070,17 +1091,7 @@ impl<RT: Runtime> Storage for LocalDirStorage<RT> {
         &self,
         key: &FullyQualifiedObjectKey,
     ) -> anyhow::Result<Option<ObjectAttributes>> {
-        let path = Path::new(key.as_str());
-        let mut buf = vec![];
-        let result = File::open(path);
-        if result.is_err() {
-            return Ok(None);
-        }
-        let mut file = result.unwrap();
-        file.read_to_end(&mut buf)?;
-        Ok(Some(ObjectAttributes {
-            size: buf.len() as u64,
-        }))
+        local_object_attributes(Path::new(key.as_str()))
     }
 
     fn storage_type_proto(&self) -> pb::searchlight::StorageType {

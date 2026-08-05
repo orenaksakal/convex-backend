@@ -83,7 +83,11 @@ pub mod interface;
 mod metrics;
 mod zip_uploader;
 
-use crate::metrics::export_timer;
+use crate::metrics::{
+    export_timer,
+    storage_tablet_registered,
+    storage_tablet_unregistered,
+};
 pub use crate::{
     export_storage::FileStorageZipMetadata,
     zip_uploader::README_MD_CONTENTS,
@@ -95,6 +99,36 @@ pub struct ExportComponents<RT: Runtime> {
     pub exports_storage: Arc<dyn Storage>,
     pub file_storage: Arc<dyn Storage>,
     pub deployment_name: String,
+}
+
+struct StorageTabletMetricGuard;
+
+impl StorageTabletMetricGuard {
+    fn new() -> Self {
+        storage_tablet_registered();
+        Self
+    }
+}
+
+impl Drop for StorageTabletMetricGuard {
+    fn drop(&mut self) {
+        storage_tablet_unregistered();
+    }
+}
+
+fn finish_storage_table_write(
+    write_result: anyhow::Result<()>,
+    unregister: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let unregister_result = unregister();
+    match (write_result, unregister_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(unregister_error)) => Err(unregister_error),
+        (Err(write_error), Ok(())) => Err(write_error),
+        (Err(write_error), Err(unregister_error)) => Err(write_error.context(format!(
+            "also failed to release _file_storage tablet after export error: {unregister_error:#}"
+        ))),
+    }
 }
 
 /// Uploads an export to exports_storage at the returned `ObjectKey`.
@@ -420,15 +454,21 @@ where
                 ]
             });
             let storage_total_entries = storage_table_counts.get(&namespace).copied().unwrap_or(0);
-            write_storage_table(
+            let tablet_id = *system_tables
+                .get(&(namespace, FILE_STORAGE_TABLE.clone()))
+                .context("_file_storage does not exist")?;
+            let by_id = *by_id_indexes
+                .get(&tablet_id)
+                .context("_file_storage.by_id does not exist")?;
+            let _tablet_metric = StorageTabletMetricGuard::new();
+            let write_result = write_storage_table(
                 components,
                 &path_prefix,
                 &mut zip_snapshot_upload,
-                namespace,
                 &component_path,
                 &mut table_iterator,
-                &by_id_indexes,
-                &system_tables,
+                tablet_id,
+                by_id,
                 &usage,
                 requestor,
                 &update_progress,
@@ -436,7 +476,10 @@ where
                 storage_total_entries,
             )
             .in_span(root)
-            .await?;
+            .await;
+            finish_storage_table_write(write_result, || {
+                table_iterator.unregister_table(tablet_id)
+            })?;
         }
     }
 
@@ -457,4 +500,39 @@ fn get_export_path_prefix(component_path: &ComponentPath) -> String {
             )
         })
         .join("")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{
+        AtomicBool,
+        Ordering,
+    };
+
+    use anyhow::anyhow;
+
+    use super::finish_storage_table_write;
+
+    #[test]
+    fn storage_table_cleanup_runs_after_success_and_failure() {
+        for write_result in [Ok(()), Err(anyhow!("injected export failure"))] {
+            let cleanup_called = AtomicBool::new(false);
+            let _result = finish_storage_table_write(write_result, || {
+                cleanup_called.store(true, Ordering::SeqCst);
+                Ok(())
+            });
+            assert!(cleanup_called.load(Ordering::SeqCst));
+        }
+    }
+
+    #[test]
+    fn storage_table_cleanup_preserves_primary_export_error() {
+        let error = finish_storage_table_write(Err(anyhow!("primary export failure")), || {
+            Err(anyhow!("secondary cleanup failure"))
+        })
+        .expect_err("combined export and cleanup failure must be returned");
+        let error = format!("{error:#}");
+        assert!(error.contains("primary export failure"));
+        assert!(error.contains("secondary cleanup failure"));
+    }
 }

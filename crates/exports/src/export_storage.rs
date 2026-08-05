@@ -1,7 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    time::Instant,
-};
+use std::time::Instant;
 
 use anyhow::Context;
 use bytes::Bytes;
@@ -15,10 +12,7 @@ use common::{
     },
     persistence::LatestDocument,
     runtime::Runtime,
-    types::{
-        IndexId,
-        TableName,
-    },
+    types::IndexId,
 };
 use database::MultiTableIterator;
 use fastrace::{
@@ -37,7 +31,6 @@ use model::{
     exports::types::ExportRequestor,
     file_storage::{
         types::FileStorageEntry,
-        FILE_STORAGE_TABLE,
         FILE_STORAGE_VIRTUAL_TABLE,
     },
 };
@@ -54,25 +47,84 @@ use usage_tracking::{
     StorageCallTracker,
     StorageUsageTracker,
 };
-use value::{
-    TableNamespace,
-    TabletId,
-};
+use value::TabletId;
 
 use crate::{
+    metrics::{
+        storage_file_prefetched,
+        storage_file_released,
+    },
     zip_uploader::ZipSnapshotUpload,
     ExportComponents,
 };
+
+struct TrackedPrefetchPermit<'a> {
+    _permit: tokio::sync::SemaphorePermit<'a>,
+    prefetched_bytes: Option<usize>,
+}
+
+impl<'a> TrackedPrefetchPermit<'a> {
+    fn new(permit: tokio::sync::SemaphorePermit<'a>, bytes: usize) -> Self {
+        storage_file_prefetched(bytes);
+        Self {
+            _permit: permit,
+            prefetched_bytes: Some(bytes),
+        }
+    }
+
+    fn serial(permit: tokio::sync::SemaphorePermit<'a>) -> Self {
+        Self {
+            _permit: permit,
+            prefetched_bytes: None,
+        }
+    }
+}
+
+impl Drop for TrackedPrefetchPermit<'_> {
+    fn drop(&mut self) {
+        if let Some(bytes) = self.prefetched_bytes {
+            storage_file_released(bytes);
+        }
+    }
+}
+
+async fn collect_prefetched_file<E>(
+    mut stream: impl futures::Stream<Item = Result<Bytes, E>> + Unpin,
+    expected_bytes: usize,
+) -> anyhow::Result<Vec<Bytes>>
+where
+    E: Into<anyhow::Error>,
+{
+    let mut chunks = Vec::new();
+    let mut actual_bytes = 0usize;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(Into::into)?;
+        actual_bytes = actual_bytes
+            .checked_add(chunk.len())
+            .context("storage file size overflow while prefetching export")?;
+        anyhow::ensure!(
+            actual_bytes <= expected_bytes,
+            "storage returned more bytes than its advertised content length: expected \
+             {expected_bytes}, received at least {actual_bytes}",
+        );
+        chunks.push(chunk);
+    }
+    anyhow::ensure!(
+        actual_bytes == expected_bytes,
+        "storage returned fewer bytes than its advertised content length: expected \
+         {expected_bytes}, received {actual_bytes}",
+    );
+    Ok(chunks)
+}
 
 pub(crate) async fn write_storage_table<'a, 'b: 'a, F, Fut, RT: Runtime>(
     components: &ExportComponents<RT>,
     path_prefix: &str,
     zip_snapshot_upload: &'a mut ZipSnapshotUpload<'b>,
-    namespace: TableNamespace,
     component_path: &ComponentPath,
     table_iterator: &mut MultiTableIterator<RT>,
-    by_id_indexes: &BTreeMap<TabletId, IndexId>,
-    system_tables: &BTreeMap<(TableNamespace, TableName), TabletId>,
+    tablet_id: TabletId,
+    by_id: IndexId,
     usage: &FunctionUsageTracker,
     requestor: ExportRequestor,
     update_progress: &F,
@@ -83,20 +135,12 @@ where
     F: Fn(String) -> Fut + Send,
     Fut: Future<Output = anyhow::Result<()>> + Send,
 {
-    // _storage
-    let tablet_id = system_tables
-        .get(&(namespace, FILE_STORAGE_TABLE.clone()))
-        .context("_file_storage does not exist")?;
-    let by_id = by_id_indexes
-        .get(tablet_id)
-        .context("_file_storage.by_id does not exist")?;
-
     // First write metadata to _storage/documents.jsonl
     let mut table_upload = zip_snapshot_upload
         .start_system_table(path_prefix, FILE_STORAGE_VIRTUAL_TABLE.clone())
         .await?;
     {
-        let stream = table_iterator.stream_documents_in_table(*tablet_id, *by_id, None);
+        let stream = table_iterator.stream_documents_in_table(tablet_id, by_id, None);
         pin_mut!(stream);
         let mut num_storage_entries: u64 = 0;
         let mut last_log_time = Instant::now();
@@ -136,7 +180,7 @@ where
     let max_prefetch_bytes = *EXPORT_MAX_INFLIGHT_PREFETCH_BYTES;
     let inflight_bytes_semaphore = tokio::sync::Semaphore::new(max_prefetch_bytes);
     let files_stream = table_iterator
-        .stream_documents_in_table(*tablet_id, *by_id, None)
+        .stream_documents_in_table(tablet_id, by_id, None)
         .map_ok(|LatestDocument { value: doc, .. }| async {
             let file_storage_entry = ParseDocument::<FileStorageEntry>::parse(doc)?;
             let virtual_storage_id = file_storage_entry.id().developer_id;
@@ -187,15 +231,16 @@ where
                 )
                 .await;
 
-            if (file_stream.content_length as usize) < max_prefetch_bytes {
+            let content_length = usize::try_from(file_stream.content_length)
+                .context("storage returned a negative or unsupported content length")?;
+            if content_length < max_prefetch_bytes {
                 let permit = inflight_bytes_semaphore
-                    .acquire_many(file_stream.content_length as u32)
+                    .acquire_many(content_length as u32)
                     .await?;
+                let permit = TrackedPrefetchPermit::new(permit, content_length);
                 // Prefetch the file before passing it to the zip writer.
                 // This can happen in parallel with other files.
-                let bytes: Vec<Bytes> = file_stream
-                    .stream
-                    .try_collect()
+                let bytes = collect_prefetched_file(file_stream.stream, content_length)
                     .in_span(Span::enter_with_local_parent("prefetch_storage_file"))
                     .await?;
                 let stream = StreamReader::new(stream::iter(bytes.into_iter().map(Ok)).boxed());
@@ -206,6 +251,7 @@ where
                 let permit = inflight_bytes_semaphore
                     .acquire_many(max_prefetch_bytes as u32)
                     .await?;
+                let permit = TrackedPrefetchPermit::serial(permit);
                 // Note that fetching won't start until the reader is first polled (which won't
                 // happen until it's passed to `stream_full_file`).
                 Ok((path, file_stream.into_tokio_reader(), permit))
@@ -249,4 +295,51 @@ pub struct FileStorageZipMetadata {
     pub size: Option<i64>,
     pub content_type: Option<String>,
     pub internal_id: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::anyhow;
+    use bytes::Bytes;
+    use futures::stream;
+
+    use super::collect_prefetched_file;
+
+    #[tokio::test]
+    async fn prefetched_file_must_match_advertised_size() -> anyhow::Result<()> {
+        let chunks = stream::iter([
+            Ok::<_, anyhow::Error>(Bytes::from_static(b"abc")),
+            Ok::<_, anyhow::Error>(Bytes::from_static(b"defg")),
+        ]);
+        let result = collect_prefetched_file(chunks, 7).await?;
+        assert_eq!(result.concat(), b"abcdefg");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prefetch_rejects_more_bytes_than_reserved() {
+        let chunks = stream::iter([Ok::<_, anyhow::Error>(Bytes::from_static(b"too many"))]);
+        let error = collect_prefetched_file(chunks, 3)
+            .await
+            .expect_err("prefetch must reject oversized storage responses");
+        assert!(error.to_string().contains("more bytes"));
+    }
+
+    #[tokio::test]
+    async fn prefetch_rejects_truncated_and_failed_storage_responses() {
+        let truncated = stream::iter([Ok::<_, anyhow::Error>(Bytes::from_static(b"short"))]);
+        let error = collect_prefetched_file(truncated, 8)
+            .await
+            .expect_err("prefetch must reject truncated storage responses");
+        assert!(error.to_string().contains("fewer bytes"));
+
+        let failed = stream::iter([
+            Ok::<_, anyhow::Error>(Bytes::from_static(b"abc")),
+            Err(anyhow!("injected read failure")),
+        ]);
+        let error = collect_prefetched_file(failed, 8)
+            .await
+            .expect_err("prefetch must preserve storage failures");
+        assert!(error.to_string().contains("injected read failure"));
+    }
 }
