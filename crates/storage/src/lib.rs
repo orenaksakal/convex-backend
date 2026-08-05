@@ -346,6 +346,7 @@ pub struct BufferedUpload {
     buffer: Vec<u8>,
     max_intermediate_part_size: usize,
     target_intermediate_part_size: usize,
+    wrote_intermediate_part: bool,
 }
 
 impl BufferedUpload {
@@ -360,16 +361,29 @@ impl BufferedUpload {
             buffer,
             max_intermediate_part_size,
             target_intermediate_part_size: min_intermediate_part_size,
+            wrote_intermediate_part: false,
         }
     }
 
-    fn update_buffer_and_get_next(&mut self, data: Bytes) -> Option<Bytes> {
-        Self::_update_buffer_and_get_next(
+    fn update_buffer_and_get_ready(&mut self, data: Bytes) -> Vec<Bytes> {
+        let mut ready = Vec::new();
+        if let Some(part) = Self::_update_buffer_and_get_next(
             &mut self.buffer,
             &mut self.target_intermediate_part_size,
             self.max_intermediate_part_size,
             data,
-        )
+        ) {
+            ready.push(part);
+        }
+        while let Some(part) = Self::_update_buffer_and_get_next(
+            &mut self.buffer,
+            &mut self.target_intermediate_part_size,
+            self.max_intermediate_part_size,
+            Bytes::new(),
+        ) {
+            ready.push(part);
+        }
+        ready
     }
 
     // Hack around wanting to use this when `upload` is borrowed. Rust can't
@@ -414,8 +428,9 @@ impl BufferedUpload {
 #[async_trait]
 impl Upload for BufferedUpload {
     async fn write(&mut self, data: Bytes) -> anyhow::Result<()> {
-        if let Some(buf) = self.update_buffer_and_get_next(data) {
+        for buf in self.update_buffer_and_get_ready(data) {
             self.upload.write(buf).await?;
+            self.wrote_intermediate_part = true;
         }
         Ok(())
     }
@@ -436,13 +451,26 @@ impl Upload for BufferedUpload {
                     match result {
                         Err(e) => tx.send(Err(e)).await?,
                         Ok(buf) => {
-                            if let Some(buf) = Self::_update_buffer_and_get_next(
+                            let mut ready = Vec::new();
+                            if let Some(part) = Self::_update_buffer_and_get_next(
                                 &mut self.buffer,
                                 &mut self.target_intermediate_part_size,
                                 self.max_intermediate_part_size,
                                 buf,
                             ) {
-                                tx.send(Ok(buf)).await?;
+                                ready.push(part);
+                            }
+                            while let Some(part) = Self::_update_buffer_and_get_next(
+                                &mut self.buffer,
+                                &mut self.target_intermediate_part_size,
+                                self.max_intermediate_part_size,
+                                Bytes::new(),
+                            ) {
+                                ready.push(part);
+                            }
+                            for part in ready {
+                                tx.send(Ok(part)).await?;
+                                self.wrote_intermediate_part = true;
                             }
                         },
                     }
@@ -476,9 +504,12 @@ impl Upload for BufferedUpload {
         let Self {
             buffer: ready,
             mut upload,
+            wrote_intermediate_part,
             ..
         } = *self;
-        upload.write(ready.into()).await?;
+        if !ready.is_empty() || !wrote_intermediate_part {
+            upload.write(ready.into()).await?;
+        }
         upload.complete().await
     }
 }
@@ -1231,5 +1262,179 @@ impl Display for StorageUseCase {
             StorageUseCase::Files => write!(f, "files"),
             StorageUseCase::SearchIndexes => write!(f, "search"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs::File,
+        path::Path,
+        pin::Pin,
+        sync::{
+            Arc,
+            Mutex,
+        },
+    };
+
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use futures::{
+        stream,
+        Stream,
+        StreamExt,
+    };
+    use tempfile::tempdir;
+
+    use super::{
+        local_object_attributes,
+        BufferedUpload,
+        ObjectKey,
+        Upload,
+    };
+
+    struct StrictMultipartUpload {
+        parts: Arc<Mutex<Vec<Bytes>>>,
+        fixed_part_size: usize,
+    }
+
+    #[async_trait]
+    impl Upload for StrictMultipartUpload {
+        async fn write(&mut self, data: Bytes) -> anyhow::Result<()> {
+            self.parts.lock().expect("parts lock poisoned").push(data);
+            Ok(())
+        }
+
+        async fn try_write_parallel<'a>(
+            &'a mut self,
+            stream: &mut Pin<Box<dyn Stream<Item = anyhow::Result<Bytes>> + Send + 'a>>,
+        ) -> anyhow::Result<()> {
+            while let Some(part) = stream.next().await {
+                self.write(part?).await?;
+            }
+            Ok(())
+        }
+
+        async fn abort(self: Box<Self>) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn complete(self: Box<Self>) -> anyhow::Result<ObjectKey> {
+            let parts = self.parts.lock().expect("parts lock poisoned");
+            for part in parts.iter().take(parts.len().saturating_sub(1)) {
+                anyhow::ensure!(
+                    part.len() == self.fixed_part_size,
+                    "strict multipart provider rejected non-final part of {} bytes; expected {}",
+                    part.len(),
+                    self.fixed_part_size
+                );
+            }
+            if let Some(final_part) = parts.last() {
+                anyhow::ensure!(final_part.len() <= self.fixed_part_size);
+            }
+            "recorded-upload".try_into()
+        }
+    }
+
+    async fn fixed_upload_parts(chunks: &[&'static [u8]], part_size: usize) -> Vec<Bytes> {
+        let parts = Arc::new(Mutex::new(Vec::new()));
+        let recording = StrictMultipartUpload {
+            parts: parts.clone(),
+            fixed_part_size: part_size,
+        };
+        let mut upload = BufferedUpload::new(recording, part_size, part_size);
+        for chunk in chunks {
+            upload
+                .write(Bytes::from_static(chunk))
+                .await
+                .expect("fixed upload write must succeed");
+        }
+        let _object_key = Box::new(upload)
+            .complete()
+            .await
+            .expect("fixed upload completion must succeed");
+        Arc::try_unwrap(parts)
+            .expect("recording upload still referenced")
+            .into_inner()
+            .expect("parts lock poisoned")
+    }
+
+    async fn fixed_parallel_upload_parts(chunks: &[&'static [u8]], part_size: usize) -> Vec<Bytes> {
+        let parts = Arc::new(Mutex::new(Vec::new()));
+        let recording = StrictMultipartUpload {
+            parts: parts.clone(),
+            fixed_part_size: part_size,
+        };
+        let mut upload = BufferedUpload::new(recording, part_size, part_size);
+        let mut input: Pin<Box<dyn Stream<Item = anyhow::Result<Bytes>> + Send>> = Box::pin(
+            stream::iter(chunks.iter().map(|chunk| Ok(Bytes::from_static(chunk)))),
+        );
+        upload
+            .try_write_parallel(&mut input)
+            .await
+            .expect("parallel fixed upload writes must succeed");
+        drop(input);
+        let _object_key = Box::new(upload)
+            .complete()
+            .await
+            .expect("parallel fixed upload completion must succeed");
+        Arc::try_unwrap(parts)
+            .expect("recording upload still referenced")
+            .into_inner()
+            .expect("parts lock poisoned")
+    }
+
+    #[test]
+    fn local_object_attributes_uses_metadata_for_sparse_files() -> anyhow::Result<()> {
+        let temp_dir = tempdir()?;
+        let path = temp_dir.path().join("large-sparse.blob");
+        let file = File::create(&path)?;
+        let sparse_size = 8_u64 * 1024 * 1024 * 1024;
+        file.set_len(sparse_size)?;
+
+        let attributes = local_object_attributes(&path)?.expect("sparse file must exist");
+        assert_eq!(attributes.size, sparse_size);
+        Ok(())
+    }
+
+    #[test]
+    fn local_object_attributes_preserves_missing_object_behavior() -> anyhow::Result<()> {
+        assert!(local_object_attributes(Path::new("definitely-missing-storage-object"))?.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fixed_buffered_upload_emits_equal_nonfinal_parts() {
+        let parts = fixed_upload_parts(&[b"ab", b"cdefghi", b"jklm"], 5).await;
+        let part_sizes: Vec<_> = parts.iter().map(Bytes::len).collect();
+        assert_eq!(part_sizes, [5, 5, 3]);
+        assert_eq!(parts.concat(), b"abcdefghijklm");
+    }
+
+    #[tokio::test]
+    async fn fixed_buffered_upload_does_not_append_empty_exact_multiple() {
+        let parts = fixed_upload_parts(&[b"abcdefghij"], 5).await;
+        let part_sizes: Vec<_> = parts.iter().map(Bytes::len).collect();
+        assert_eq!(part_sizes, [5, 5]);
+    }
+
+    #[tokio::test]
+    async fn fixed_buffered_upload_preserves_empty_and_short_objects() {
+        let empty = fixed_upload_parts(&[], 5).await;
+        assert_eq!(empty.iter().map(Bytes::len).collect::<Vec<_>>(), [0]);
+
+        let short = fixed_upload_parts(&[b"abc"], 5).await;
+        assert_eq!(short.iter().map(Bytes::len).collect::<Vec<_>>(), [3]);
+        assert_eq!(short.concat(), b"abc");
+    }
+
+    #[tokio::test]
+    async fn fixed_buffered_upload_parallel_path_passes_strict_provider() {
+        let parts = fixed_parallel_upload_parts(&[b"a", b"bcdefghijkl", b"mnop"], 5).await;
+        assert_eq!(
+            parts.iter().map(Bytes::len).collect::<Vec<_>>(),
+            [5, 5, 5, 1]
+        );
+        assert_eq!(parts.concat(), b"abcdefghijklmnop");
     }
 }

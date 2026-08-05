@@ -19,6 +19,28 @@ Optionally set the `S3_ENDPOINT_URL` environment variable. This is required for
 using [R2](https://www.cloudflare.com/developer-platform/products/r2/) or some
 other drop-in replacement compatible with the AWS S3 API.
 
+### Fixed multipart parts for strict providers
+
+Some S3-compatible providers, including Cloudflare R2, require every non-final
+multipart part to have exactly the same size. Enable fixed-size buffering
+explicitly; the backend does not infer provider behavior from the endpoint
+hostname:
+
+```sh
+export AWS_S3_FIXED_MULTIPART_PART_SIZE_BYTES="67108864" # 64 MiB
+export AWS_S3_MAX_MULTIPART_OBJECT_SIZE_BYTES="536870912000" # 500 GiB
+```
+
+The fixed part size must be between S3's 5-MiB minimum and the configured
+intermediate-part maximum. The optional maximum object size is a startup
+validation boundary: the backend rejects a value requiring more than 10,000
+parts. Choose it at or above the largest expected snapshot export. A 64-MiB
+part supports at most 640,000 MiB (625 GiB) before the 10,000-part boundary.
+
+Do not use checksum or server-side-encryption switches as substitutes for this
+setting; they do not change multipart boundaries. Existing AWS S3 deployments
+retain adaptive part sizing when the fixed-size variable is unset.
+
 Then run the backend!
 
 ## Migrating storage providers

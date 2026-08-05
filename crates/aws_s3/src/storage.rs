@@ -83,6 +83,7 @@ use storage::{
     Upload,
     UploadId,
     MAXIMUM_PARALLEL_UPLOADS,
+    MAX_NUM_PARTS,
 };
 
 use crate::{
@@ -105,6 +106,78 @@ pub const ACCESS_KEY_MAX_BACKOFF: Duration = Duration::from_secs(5);
 const MIN_S3_INTERMEDIATE_PART_SIZE: usize = 5 * (1 << 20);
 /// S3 maximum part size for multipart upload is 5GiB
 const MAX_S3_INTERMEDIATE_PART_SIZE: usize = 5 * (1 << 30);
+const FIXED_MULTIPART_PART_SIZE_ENV: &str = "AWS_S3_FIXED_MULTIPART_PART_SIZE_BYTES";
+const MAX_MULTIPART_OBJECT_SIZE_ENV: &str = "AWS_S3_MAX_MULTIPART_OBJECT_SIZE_BYTES";
+
+fn parse_optional_bytes(name: &str, value: Option<&str>) -> anyhow::Result<Option<u64>> {
+    value
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .with_context(|| format!("{name} must be an unsigned byte count, got {value:?}"))
+        })
+        .transpose()
+}
+
+fn validate_fixed_multipart_config(
+    fixed_part_size: Option<&str>,
+    maximum_object_size: Option<&str>,
+    configured_max_part_size: usize,
+) -> anyhow::Result<Option<usize>> {
+    let fixed_part_size = parse_optional_bytes(FIXED_MULTIPART_PART_SIZE_ENV, fixed_part_size)?;
+    let maximum_object_size =
+        parse_optional_bytes(MAX_MULTIPART_OBJECT_SIZE_ENV, maximum_object_size)?;
+
+    let Some(fixed_part_size) = fixed_part_size else {
+        anyhow::ensure!(
+            maximum_object_size.is_none(),
+            "{MAX_MULTIPART_OBJECT_SIZE_ENV} requires {FIXED_MULTIPART_PART_SIZE_ENV}"
+        );
+        return Ok(None);
+    };
+    let effective_max_part_size =
+        std::cmp::min(MAX_S3_INTERMEDIATE_PART_SIZE, configured_max_part_size) as u64;
+    anyhow::ensure!(
+        fixed_part_size >= MIN_S3_INTERMEDIATE_PART_SIZE as u64,
+        "{FIXED_MULTIPART_PART_SIZE_ENV} must be at least {} bytes",
+        MIN_S3_INTERMEDIATE_PART_SIZE
+    );
+    anyhow::ensure!(
+        fixed_part_size <= effective_max_part_size,
+        "{FIXED_MULTIPART_PART_SIZE_ENV} must not exceed {effective_max_part_size} bytes"
+    );
+    let fixed_part_size = usize::try_from(fixed_part_size)
+        .context("fixed multipart part size does not fit this platform")?;
+
+    if let Some(maximum_object_size) = maximum_object_size {
+        let supported_object_size = (fixed_part_size as u64)
+            .checked_mul(MAX_NUM_PARTS as u64)
+            .context("fixed multipart capacity overflow")?;
+        anyhow::ensure!(
+            maximum_object_size <= supported_object_size,
+            "{MAX_MULTIPART_OBJECT_SIZE_ENV}={maximum_object_size} requires more than \
+             {MAX_NUM_PARTS} parts of {fixed_part_size} bytes"
+        );
+    }
+    Ok(Some(fixed_part_size))
+}
+
+fn fixed_multipart_part_size_from_env() -> anyhow::Result<Option<usize>> {
+    let optional_env = |name| match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{name} must contain valid Unicode digits")
+        },
+    };
+    let fixed_part_size = optional_env(FIXED_MULTIPART_PART_SIZE_ENV)?;
+    let maximum_object_size = optional_env(MAX_MULTIPART_OBJECT_SIZE_ENV)?;
+    validate_fixed_multipart_config(
+        fixed_part_size.as_deref(),
+        maximum_object_size.as_deref(),
+        *STORAGE_MAX_INTERMEDIATE_PART_SIZE,
+    )
+}
 
 #[derive(Clone)]
 pub struct S3Storage<RT: Runtime> {
@@ -114,6 +187,7 @@ pub struct S3Storage<RT: Runtime> {
     // Prefix gets added as prefix to all keys.
     key_prefix: String,
     runtime: RT,
+    fixed_multipart_part_size: Option<usize>,
 }
 
 impl<RT: Runtime> std::fmt::Debug for S3Storage<RT> {
@@ -138,6 +212,7 @@ impl<RT: Runtime> S3Storage<RT> {
             bucket,
             key_prefix,
             runtime,
+            fixed_multipart_part_size: fixed_multipart_part_size_from_env()?,
         })
     }
 
@@ -152,6 +227,7 @@ impl<RT: Runtime> S3Storage<RT> {
             bucket,
             key_prefix,
             runtime,
+            fixed_multipart_part_size: fixed_multipart_part_size_from_env()?,
         };
         Ok(storage)
     }
@@ -286,14 +362,18 @@ impl<RT: Runtime> Storage for S3Storage<RT> {
     #[fastrace::trace]
     async fn start_upload(&self) -> anyhow::Result<Box<BufferedUpload>> {
         let key: ObjectKey = self.runtime.new_uuid_v4().to_string().try_into()?;
-        let upload = BufferedUpload::new(
-            self.start_upload_with_key(key).await?,
-            MIN_S3_INTERMEDIATE_PART_SIZE,
-            std::cmp::min(
-                MAX_S3_INTERMEDIATE_PART_SIZE,
-                *STORAGE_MAX_INTERMEDIATE_PART_SIZE,
+        let upload = self.start_upload_with_key(key).await?;
+        let upload = match self.fixed_multipart_part_size {
+            Some(part_size) => BufferedUpload::new(upload, part_size, part_size),
+            None => BufferedUpload::new(
+                upload,
+                MIN_S3_INTERMEDIATE_PART_SIZE,
+                std::cmp::min(
+                    MAX_S3_INTERMEDIATE_PART_SIZE,
+                    *STORAGE_MAX_INTERMEDIATE_PART_SIZE,
+                ),
             ),
-        );
+        };
         Ok(Box::new(upload))
     }
 
@@ -866,3 +946,61 @@ pub fn s3_bucket_name(use_case: &StorageUseCase) -> anyhow::Result<String> {
 }
 
 // Test below only works if you have AWS environment variables set
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        validate_fixed_multipart_config,
+        FIXED_MULTIPART_PART_SIZE_ENV,
+        MAX_MULTIPART_OBJECT_SIZE_ENV,
+        MIN_S3_INTERMEDIATE_PART_SIZE,
+    };
+
+    const SIXTY_FOUR_MIB: usize = 64 * 1024 * 1024;
+
+    #[test]
+    fn fixed_multipart_config_is_explicit_and_bounded() -> anyhow::Result<()> {
+        assert_eq!(
+            validate_fixed_multipart_config(None, None, SIXTY_FOUR_MIB)?,
+            None
+        );
+        assert_eq!(
+            validate_fixed_multipart_config(
+                Some(&SIXTY_FOUR_MIB.to_string()),
+                Some(&(500_u64 * 1024 * 1024 * 1024).to_string()),
+                SIXTY_FOUR_MIB,
+            )?,
+            Some(SIXTY_FOUR_MIB)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fixed_multipart_config_rejects_invalid_sizes() {
+        let too_small = (MIN_S3_INTERMEDIATE_PART_SIZE - 1).to_string();
+        let error = validate_fixed_multipart_config(Some(&too_small), None, SIXTY_FOUR_MIB)
+            .expect_err("parts smaller than the S3 minimum must be rejected");
+        assert!(error.to_string().contains("at least"));
+
+        let error = validate_fixed_multipart_config(Some("not-a-number"), None, SIXTY_FOUR_MIB)
+            .expect_err("malformed part sizes must be rejected");
+        assert!(error.to_string().contains(FIXED_MULTIPART_PART_SIZE_ENV));
+
+        let error = validate_fixed_multipart_config(None, Some("123"), SIXTY_FOUR_MIB)
+            .expect_err("maximum object size without fixed parts must be rejected");
+        assert!(error.to_string().contains(MAX_MULTIPART_OBJECT_SIZE_ENV));
+    }
+
+    #[test]
+    fn fixed_multipart_config_rejects_more_than_ten_thousand_parts() {
+        let part_size = MIN_S3_INTERMEDIATE_PART_SIZE.to_string();
+        let impossible_size = ((MIN_S3_INTERMEDIATE_PART_SIZE as u64 * 10_000) + 1).to_string();
+        let error = validate_fixed_multipart_config(
+            Some(&part_size),
+            Some(&impossible_size),
+            SIXTY_FOUR_MIB,
+        )
+        .expect_err("impossible multipart object size must be rejected");
+        assert!(error.to_string().contains("more than 10000 parts"));
+    }
+}
