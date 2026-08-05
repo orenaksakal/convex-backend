@@ -446,7 +446,7 @@ test("failed source cleanup still enforces external cache bounds", async () => {
   });
   const server = await startPackageServer(routes);
   const realRm = fs.promises.rm;
-  const sourceStagingPrefix = path.join(tmpdir!, "source", ".");
+  const sourceStagingPrefix = `${path.join(tmpdir!, "source")}${path.sep}.`;
   vi.spyOn(fs.promises, "rm").mockImplementation(
     async (...args: Parameters<typeof fs.promises.rm>) => {
       const [target] = args;

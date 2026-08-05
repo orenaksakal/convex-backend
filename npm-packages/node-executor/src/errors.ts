@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
@@ -36,6 +37,18 @@ const stackTraceStats = {
   framesProcessed: 0,
   durationMs: 0,
 };
+
+function normalizeModulesDir(modulesDir: string): string {
+  const resolved = path.resolve(modulesDir);
+  try {
+    // macOS commonly exposes temporary directories through /var while V8
+    // reports their canonical /private/var path. Register the filesystem's
+    // canonical path so both forms map to the same user module root.
+    return fs.realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
 
 export function getPrepareStackTraceStats() {
   return {
@@ -234,7 +247,7 @@ export function captureErrorFrames(error: unknown): FrameData[] {
 }
 
 export function registerPrepareStackTrace(modulesDir: string) {
-  const normalizedModulesDir = path.resolve(modulesDir);
+  const normalizedModulesDir = normalizeModulesDir(modulesDir);
   // Install first so a user-defined non-writable hook cannot leave a root
   // registered for a source package whose publication then fails.
   installPrepareStackTrace();
@@ -245,7 +258,7 @@ export function registerPrepareStackTrace(modulesDir: string) {
 }
 
 export function unregisterPrepareStackTrace(modulesDir: string) {
-  const normalizedModulesDir = path.resolve(modulesDir);
+  const normalizedModulesDir = normalizeModulesDir(modulesDir);
   const registrations = userModulesDirs.get(normalizedModulesDir);
   if (registrations === undefined) {
     throw new executorErrorConstructor(
