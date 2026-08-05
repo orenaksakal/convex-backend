@@ -267,7 +267,7 @@ pub async fn make_app(
     persistence: Arc<dyn Persistence>,
     zombify_rx: async_broadcast::Receiver<()>,
     preempt_tx: ShutdownSignal,
-    memory_reclamation: MemoryPressureSignal,
+    _memory_reclamation: MemoryPressureSignal,
     node_executor_config: LocalNodeExecutorConfig,
 ) -> anyhow::Result<LocalAppState> {
     let key_broker = config.key_broker()?;

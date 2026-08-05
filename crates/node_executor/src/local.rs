@@ -107,6 +107,7 @@ const MAX_INVOKE_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_NODE_VERSION_OUTPUT_BYTES: usize = 1024;
 const MAX_HEALTH_CHECK_ATTEMPTS: u32 = 50;
 const NODE_VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(target_os = "linux")]
 const PROCESS_PROCFS_READ_TIMEOUT: Duration = Duration::from_secs(1);
 const WATCHDOG_INTERVAL: Duration = Duration::from_secs(1);
 const WATCHDOG_FAILURE_THRESHOLD: u32 = 5;
@@ -127,6 +128,7 @@ const MAX_DIAGNOSTIC_PROFILE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_DIAGNOSTIC_REPORT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_DIAGNOSTIC_ACTIVE_REQUESTS: usize = 64;
 const MAX_DIAGNOSTIC_REQUEST_IDENTITY_BYTES: usize = 512;
+#[cfg(target_os = "linux")]
 const MAX_DIAGNOSTIC_THREADS: usize = 256;
 const MAX_DIAGNOSTIC_ARTIFACTS: usize = 96;
 const MAX_DIAGNOSTIC_ARTIFACT_BYTES: u64 = 256 * 1024 * 1024;
@@ -928,6 +930,7 @@ impl NodeDiagnosticPaths {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn parse_process_stat(stat: &str) -> anyhow::Result<ProcessStatSnapshot> {
     let comm_end = stat
         .rfind(')')
@@ -3655,8 +3658,9 @@ mod tests {
             AsyncWriteExt,
         },
         net::UnixListener,
-        sync::oneshot,
     };
+    #[cfg(target_os = "linux")]
+    use tokio::sync::oneshot;
 
     use super::*;
 
