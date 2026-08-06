@@ -29,6 +29,15 @@ chain.
 - Rollback: restore the upstream connection wrapper only after confirming that canceled operations
   cannot leave pending statements or reusable unread responses.
 
+### [Cancellation-safe PostgreSQL connections](cancellation_safe_postgres_connections/README.md)
+
+- Purpose: poison an interrupted PostgreSQL connection and issue an independent protocol cancel
+  request when its owning future or result stream is dropped.
+- Prerequisites: PostgreSQL persistence; no runtime scheduler or function-execution patch.
+- Activation: automatic for PostgreSQL persistence after backend rollout.
+- Rollback: restore the prior backend only after accepting that canceled statements may continue
+  and their clients may return to the idle pool.
+
 ## Snapshot and import reliability
 
 ### [Materialize snapshot import ZIPs](snapshot_import_zip_materialization/README.md)

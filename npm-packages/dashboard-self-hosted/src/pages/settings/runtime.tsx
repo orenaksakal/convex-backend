@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { Button } from "@ui/Button";
 import { Callout } from "@ui/Callout";
 import { DeploymentSettingsLayout } from "@common/layouts/DeploymentSettingsLayout";
+import { DeploymentInfoContext } from "@common/lib/deploymentContext";
 import { OperatorActionConfirmation } from "../../components/operator/OperatorActionConfirmation";
 import {
   ExecutedOperatorAction,
@@ -23,7 +24,14 @@ type RuntimeData = {
 
 type ProposedValues = Record<string, string | boolean>;
 
+type RuntimeMetrics = {
+  observedAtUnixMs: number;
+  exposition: string;
+  familyCount: number;
+};
+
 export default function RuntimeSettingsPage() {
+  const deployment = useContext(DeploymentInfoContext);
   const [data, setData] = useState<RuntimeData | null>(null);
   const [proposed, setProposed] = useState<ProposedValues>({});
   const [loading, setLoading] = useState(true);
@@ -38,6 +46,12 @@ export default function RuntimeSettingsPage() {
     useState<PreparedOperatorAction | null>(null);
   const [acceptedRestart, setAcceptedRestart] =
     useState<ExecutedOperatorAction | null>(null);
+  const [runtimeMetrics, setRuntimeMetrics] = useState<RuntimeMetrics | null>(
+    null,
+  );
+  const [runtimeMetricsError, setRuntimeMetricsError] = useState<Error | null>(
+    null,
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -73,6 +87,24 @@ export default function RuntimeSettingsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (!deployment.ok) return;
+    let cancelled = false;
+    void fetchRuntimeMetrics(deployment)
+      .then((metrics) => {
+        if (!cancelled) {
+          setRuntimeMetrics(metrics);
+          setRuntimeMetricsError(null);
+        }
+      })
+      .catch((metricsError: unknown) => {
+        if (!cancelled) setRuntimeMetricsError(asError(metricsError));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [deployment]);
 
   const changes = useMemo(() => {
     if (!data) return [];
@@ -170,6 +202,10 @@ export default function RuntimeSettingsPage() {
         {data && !loading && (
           <>
             <RuntimeSummary data={data} />
+            <RuntimeObservability
+              metrics={runtimeMetrics}
+              error={runtimeMetricsError}
+            />
             {saveResult && (
               <Callout
                 variant={
@@ -589,8 +625,110 @@ function knobGroup(name: string) {
   if (name.startsWith("LOCAL_NODE_")) return "Local Node executor";
   if (name.startsWith("LOCAL_BACKEND_")) return "Memory protection";
   if (name.startsWith("POSTGRES_")) return "Postgres";
+  if (name.startsWith("REUSE_") || name.includes("CONTEXT_CACHE"))
+    return "Context reuse";
   if (name.startsWith("EXPORT_")) return "Snapshot export";
   return "Runtime and privacy";
+}
+
+function RuntimeObservability({
+  metrics,
+  error,
+}: {
+  metrics: RuntimeMetrics | null;
+  error: Error | null;
+}) {
+  const samples = metrics ? parsePrometheusSamples(metrics.exposition) : [];
+  return (
+    <section
+      className="rounded-lg border bg-background-secondary p-4"
+      aria-labelledby="runtime-observability-title"
+    >
+      <h4 id="runtime-observability-title" className="font-semibold">
+        Context reuse and backpressure evidence
+      </h4>
+      <p className="mt-1 max-w-prose text-sm text-content-secondary">
+        Authenticated, bounded backend counters for reusable contexts,
+        degradable-query pressure, and database cancellation. Missing series
+        means no matching activity was recorded; it is not treated as healthy.
+      </p>
+      {error ? (
+        <Callout variant="error" className="mt-3">
+          Runtime metric evidence is unavailable: {error.message}
+        </Callout>
+      ) : metrics ? (
+        <div className="mt-3">
+          <div className="text-xs text-content-secondary">
+            Observed {new Date(metrics.observedAtUnixMs).toLocaleString()} · {metrics.familyCount}{" "}
+            metric families · {samples.length} samples
+          </div>
+          {samples.length === 0 ? (
+            <div className="mt-3 rounded-md border bg-background-primary p-3 text-sm">
+              No matching runtime activity has been recorded in this process.
+            </div>
+          ) : (
+            <div className="mt-3 max-h-80 overflow-auto rounded-md border bg-background-primary">
+              <table className="w-full text-left text-xs">
+                <thead className="sticky top-0 bg-background-tertiary">
+                  <tr>
+                    <th className="px-3 py-2 font-medium">Metric series</th>
+                    <th className="px-3 py-2 text-right font-medium">Value</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {samples.map((sample) => (
+                    <tr key={sample.series}>
+                      <td className="px-3 py-2 font-mono break-all">
+                        {sample.series}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono">
+                        {sample.value}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="mt-3 text-sm text-content-secondary">
+          Loading authenticated runtime evidence…
+        </div>
+      )}
+    </section>
+  );
+}
+
+function parsePrometheusSamples(exposition: string) {
+  return exposition
+    .split("\n")
+    .filter((line) => line !== "" && !line.startsWith("#"))
+    .flatMap((line) => {
+      const match = /^(\S+)\s+([^\s]+)(?:\s+\d+)?$/.exec(line);
+      return match ? [{ series: match[1], value: match[2] }] : [];
+    });
+}
+
+async function fetchRuntimeMetrics(
+  deployment: Extract<
+    React.ContextType<typeof DeploymentInfoContext>,
+    { ok: true }
+  >,
+): Promise<RuntimeMetrics> {
+  const response = await fetch(
+    `${deployment.deploymentUrl.replace(/\/$/, "")}/api/self_hosted_runtime_metrics`,
+    {
+      headers: {
+        Authorization: `Convex ${deployment.adminKey}`,
+        "Convex-Client": "dashboard-self-hosted-runtime",
+      },
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`Backend returned ${response.status} ${response.statusText}`);
+  }
+  return (await response.json()) as RuntimeMetrics;
 }
 
 function toProposed(

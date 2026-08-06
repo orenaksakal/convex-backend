@@ -83,6 +83,7 @@ use tokio_postgres::{
         ToSql,
     },
     AsyncMessage,
+    CancelToken,
     CopyInSink,
     Row,
     RowStream,
@@ -97,6 +98,8 @@ use crate::{
         get_connection_timer,
         log_execute,
         log_poisoned_connection,
+        log_postgres_cancellation_requested,
+        log_postgres_cancellation_terminal,
         log_query,
         log_query_result,
         log_transaction,
@@ -107,6 +110,66 @@ use crate::{
 
 static POSTGRES_TIMEOUT: LazyLock<u64> =
     LazyLock::new(|| env_config("POSTGRES_TIMEOUT_SECONDS", 30));
+
+#[derive(Clone)]
+struct PostgresCancellation {
+    token: CancelToken,
+    tls_connect: MakeRustlsConnect,
+}
+
+pub(crate) struct CancellationGuard {
+    poisoned: Arc<AtomicBool>,
+    armed: bool,
+    cancellation: Option<PostgresCancellation>,
+}
+
+impl CancellationGuard {
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CancellationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.poisoned.store(true, atomic::Ordering::Release);
+        log_postgres_cancellation_requested();
+        let Some(cancellation) = self.cancellation.take() else {
+            return;
+        };
+        common::runtime::tokio_spawn("postgres_cancel_query", async move {
+            let outcome = match cancellation
+                .token
+                .cancel_query(cancellation.tls_connect)
+                .await
+            {
+                Ok(()) => "accepted",
+                Err(error) => {
+                    tracing::warn!("Postgres cancellation request failed: {error:#}");
+                    "failed"
+                },
+            };
+            log_postgres_cancellation_terminal(outcome);
+        });
+    }
+}
+
+async fn cancellation_safe<T, E>(
+    poisoned: Arc<AtomicBool>,
+    cancellation: PostgresCancellation,
+    future: impl Future<Output = Result<T, E>>,
+) -> Result<T, E> {
+    let mut guard = CancellationGuard {
+        poisoned,
+        armed: true,
+        cancellation: Some(cancellation),
+    };
+    let result = future.await;
+    guard.disarm();
+    result
+}
 
 // We have observed postgres connections hanging during bootstrapping --
 // which means backends can't start -- and during commit -- which means all
@@ -198,7 +261,7 @@ pub(crate) struct PostgresConnection<'a> {
     pool: &'a ConvexPgPool,
     _permit: SemaphorePermit<'a>,
     conn: Option<PooledConnection>,
-    poisoned: AtomicBool,
+    poisoned: Arc<AtomicBool>,
     schema: &'a SchemaName,
     instance_name: &'a PgInstanceName,
     labels: Vec<StaticMetricLabel>,
@@ -221,6 +284,13 @@ fn handle_error(poisoned: &AtomicBool, e: impl Into<anyhow::Error>) -> anyhow::E
 pub(crate) type QueryStream = impl Stream<Item = anyhow::Result<Row>>;
 
 impl PostgresConnection<'_> {
+    fn cancellation(&self) -> PostgresCancellation {
+        PostgresCancellation {
+            token: self.conn().client.cancel_token(),
+            tls_connect: self.pool.tls_connect.clone(),
+        }
+    }
+
     fn substitute_db_name(&self, query: &'static str) -> String {
         query
             .replace("@db_name", &self.schema.escaped)
@@ -252,33 +322,39 @@ impl PostgresConnection<'_> {
 
     /// If the connection is poisoned, reconnects it and returns true
     pub async fn reconnect_if_poisoned(&mut self) -> anyhow::Result<bool> {
-        if !*self.poisoned.get_mut() {
+        if !self.poisoned.load(atomic::Ordering::Acquire) {
             return Ok(false);
         }
         tracing::warn!("Retrying with a new connection");
         // Always retry with a fresh connection in case other pooled connections
         // are also stale
         self.conn = Some(self.pool.create_connection().await?);
-        self.poisoned = AtomicBool::new(false);
+        self.poisoned.store(false, atomic::Ordering::Release);
         Ok(true)
     }
 
     pub async fn batch_execute(&self, query: &'static str) -> anyhow::Result<()> {
         log_execute(self.labels.clone());
         let query = self.substitute_db_name(query);
-        with_timeout(self.conn().client.batch_execute(&query))
-            .await
-            .map_err(|e| handle_error(&self.poisoned, e))
+        with_timeout(cancellation_safe(
+            self.poisoned.clone(),
+            self.cancellation(),
+            self.conn().client.batch_execute(&query),
+        ))
+        .await
+        .map_err(|e| handle_error(&self.poisoned, e))
     }
 
     pub async fn batch_execute_no_timeout(&self, query: &'static str) -> anyhow::Result<()> {
         log_execute(self.labels.clone());
         let query = self.substitute_db_name(query);
-        self.conn()
-            .client
-            .batch_execute(&query)
-            .await
-            .map_err(|e| handle_error(&self.poisoned, e))
+        cancellation_safe(
+            self.poisoned.clone(),
+            self.cancellation(),
+            self.conn().client.batch_execute(&query),
+        )
+        .await
+        .map_err(|e| handle_error(&self.poisoned, e))
     }
 
     pub async fn query_opt(
@@ -288,9 +364,13 @@ impl PostgresConnection<'_> {
     ) -> anyhow::Result<Option<Row>> {
         log_query(self.labels.clone());
         let query = self.substitute_db_name(statement);
-        let row = with_timeout(self.conn().client.query_opt(&query, params))
-            .await
-            .map_err(|e| handle_error(&self.poisoned, e))?;
+        let row = with_timeout(cancellation_safe(
+            self.poisoned.clone(),
+            self.cancellation(),
+            self.conn().client.query_opt(&query, params),
+        ))
+        .await
+        .map_err(|e| handle_error(&self.poisoned, e))?;
         if let Some(row) = &row {
             log_query_result(row, self.labels.clone());
         }
@@ -299,10 +379,14 @@ impl PostgresConnection<'_> {
 
     pub async fn prepare_cached(&self, query: &'static str) -> anyhow::Result<Statement> {
         let conn = self.conn();
-        with_timeout(prepare_cached(
-            &conn.client,
-            &conn.statement_cache,
-            self.substitute_db_name(query),
+        with_timeout(cancellation_safe(
+            self.poisoned.clone(),
+            self.cancellation(),
+            prepare_cached(
+                &conn.client,
+                &conn.statement_cache,
+                self.substitute_db_name(query),
+            ),
         ))
         .trace_if_pending("prepare_cached")
         .await
@@ -323,21 +407,40 @@ impl PostgresConnection<'_> {
         let span = Span::enter_with_local_parent("query_raw");
         let labels = self.labels.clone();
         log_query(labels.clone());
-        let stream = with_timeout(self.conn().client.query_raw(statement, params))
-            .await
-            .map_err(|e| handle_error(&self.poisoned, e))?;
+        let stream = with_timeout(cancellation_safe(
+            self.poisoned.clone(),
+            self.cancellation(),
+            self.conn().client.query_raw(statement, params),
+        ))
+        .await
+        .map_err(|e| handle_error(&self.poisoned, e))?;
         span.add_event(Event::new("query_returned"));
-        Ok(Self::wrap_query_stream(stream, labels, span))
+        Ok(Self::wrap_query_stream(
+            stream,
+            labels,
+            span,
+            CancellationGuard {
+                poisoned: self.poisoned.clone(),
+                armed: true,
+                cancellation: Some(self.cancellation()),
+            },
+        ))
     }
 
     #[allow(clippy::needless_lifetimes)]
     #[try_stream(ok = Row, error = anyhow::Error)]
-    async fn wrap_query_stream(stream: RowStream, labels: Vec<StaticMetricLabel>, span: Span) {
+    async fn wrap_query_stream(
+        stream: RowStream,
+        labels: Vec<StaticMetricLabel>,
+        span: Span,
+        mut guard: CancellationGuard,
+    ) {
         pin_mut!(stream);
         while let Some(row) = with_timeout(stream.try_next()).await? {
             log_query_result(&row, labels.clone());
             yield row;
         }
+        guard.disarm();
         drop(span);
     }
 
@@ -347,9 +450,13 @@ impl PostgresConnection<'_> {
         params: &[&(dyn ToSql + Sync)],
     ) -> anyhow::Result<u64> {
         log_execute(self.labels.clone());
-        with_timeout(self.conn().client.execute(statement, params))
-            .await
-            .map_err(|e| handle_error(&self.poisoned, e))
+        with_timeout(cancellation_safe(
+            self.poisoned.clone(),
+            self.cancellation(),
+            self.conn().client.execute(statement, params),
+        ))
+        .await
+        .map_err(|e| handle_error(&self.poisoned, e))
     }
 
     pub async fn transaction(&mut self) -> anyhow::Result<PostgresTransaction<'_>> {
@@ -358,30 +465,56 @@ impl PostgresConnection<'_> {
             .conn
             .as_mut()
             .expect("connection is only taken in Drop");
-        let inner = match with_timeout(conn.client.transaction()).await {
+        let cancellation = PostgresCancellation {
+            token: conn.client.cancel_token(),
+            tls_connect: self.pool.tls_connect.clone(),
+        };
+        let inner = match with_timeout(cancellation_safe(
+            self.poisoned.clone(),
+            cancellation,
+            conn.client.transaction(),
+        ))
+        .await
+        {
             Ok(t) => t,
             Err(e) => return Err(handle_error(&self.poisoned, e)),
         };
         Ok(PostgresTransaction {
             inner,
             statement_cache: &conn.statement_cache,
-            poisoned: &self.poisoned,
+            poisoned: self.poisoned.clone(),
+            tls_connect: self.pool.tls_connect.clone(),
             schema: self.schema,
             instance_name: self.instance_name,
         })
     }
 
-    pub async fn copy_in(&self, query: &Statement) -> anyhow::Result<CopyInSink<Bytes>> {
+    pub async fn copy_in(
+        &self,
+        query: &Statement,
+    ) -> anyhow::Result<(CopyInSink<Bytes>, CancellationGuard)> {
         let conn = self.conn();
-        with_timeout(conn.client.copy_in(query))
-            .await
-            .map_err(|e| handle_error(&self.poisoned, e))
+        let inner = with_timeout(cancellation_safe(
+            self.poisoned.clone(),
+            self.cancellation(),
+            conn.client.copy_in(query),
+        ))
+        .await
+        .map_err(|e| handle_error(&self.poisoned, e))?;
+        Ok((
+            inner,
+            CancellationGuard {
+                poisoned: self.poisoned.clone(),
+                armed: true,
+                cancellation: Some(self.cancellation()),
+            },
+        ))
     }
 }
 
 impl Drop for PostgresConnection<'_> {
     fn drop(&mut self) {
-        if *self.poisoned.get_mut() {
+        if self.poisoned.load(atomic::Ordering::Acquire) {
             // We log here (not at poison time) in case the same connection is
             // poisoned more than once.
             log_poisoned_connection();
@@ -403,10 +536,18 @@ pub struct PostgresTransaction<'a> {
     statement_cache: &'a Mutex<StatementCache>,
     schema: &'a SchemaName,
     instance_name: &'a PgInstanceName,
-    poisoned: &'a AtomicBool,
+    poisoned: Arc<AtomicBool>,
+    tls_connect: MakeRustlsConnect,
 }
 
 impl PostgresTransaction<'_> {
+    fn cancellation(&self) -> PostgresCancellation {
+        PostgresCancellation {
+            token: self.inner.client().cancel_token(),
+            tls_connect: self.tls_connect.clone(),
+        }
+    }
+
     fn substitute_db_name(&self, query: &'static str) -> String {
         query
             .replace("@db_name", &self.schema.escaped)
@@ -414,13 +555,17 @@ impl PostgresTransaction<'_> {
     }
 
     pub async fn prepare_cached(&self, query: &'static str) -> anyhow::Result<Statement> {
-        with_timeout(prepare_cached(
-            self.inner.client(),
-            self.statement_cache,
-            self.substitute_db_name(query),
+        with_timeout(cancellation_safe(
+            self.poisoned.clone(),
+            self.cancellation(),
+            prepare_cached(
+                self.inner.client(),
+                self.statement_cache,
+                self.substitute_db_name(query),
+            ),
         ))
         .await
-        .map_err(|e| handle_error(self.poisoned, e))
+        .map_err(|e| handle_error(&self.poisoned, e))
     }
 
     pub async fn query(
@@ -428,9 +573,13 @@ impl PostgresTransaction<'_> {
         statement: &Statement,
         params: &[&(dyn ToSql + Sync)],
     ) -> anyhow::Result<Vec<Row>> {
-        with_timeout(self.inner.query(statement, params))
-            .await
-            .map_err(|e| handle_error(self.poisoned, e))
+        with_timeout(cancellation_safe(
+            self.poisoned.clone(),
+            self.cancellation(),
+            self.inner.query(statement, params),
+        ))
+        .await
+        .map_err(|e| handle_error(&self.poisoned, e))
     }
 
     pub async fn execute_raw<P, I>(&self, statement: &Statement, params: I) -> anyhow::Result<u64>
@@ -439,15 +588,24 @@ impl PostgresTransaction<'_> {
         I: IntoIterator<Item = P>,
         I::IntoIter: ExactSizeIterator,
     {
-        with_timeout(self.inner.execute_raw(statement, params))
-            .await
-            .map_err(|e| handle_error(self.poisoned, e))
+        with_timeout(cancellation_safe(
+            self.poisoned.clone(),
+            self.cancellation(),
+            self.inner.execute_raw(statement, params),
+        ))
+        .await
+        .map_err(|e| handle_error(&self.poisoned, e))
     }
 
     pub async fn commit(self) -> anyhow::Result<()> {
-        with_timeout(self.inner.commit())
-            .await
-            .map_err(|e| handle_error(self.poisoned, e))
+        let cancellation = self.cancellation();
+        with_timeout(cancellation_safe(
+            self.poisoned.clone(),
+            cancellation,
+            self.inner.commit(),
+        ))
+        .await
+        .map_err(|e| handle_error(&self.poisoned, e))
     }
 }
 
@@ -567,7 +725,7 @@ impl ConvexPgPool {
             pool: self,
             _permit: permit,
             conn: Some(conn),
-            poisoned: AtomicBool::new(false),
+            poisoned: Arc::new(AtomicBool::new(false)),
             schema,
             instance_name,
             labels: vec![StaticMetricLabel::new("name", name)],
@@ -613,5 +771,34 @@ impl ConvexPgPool {
 impl Drop for ConvexPgPool {
     fn drop(&mut self) {
         self.idle_worker.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn armed_cancellation_guard_poisons_connection_when_dropped() {
+        let poisoned = Arc::new(AtomicBool::new(false));
+        drop(CancellationGuard {
+            poisoned: poisoned.clone(),
+            armed: true,
+            cancellation: None,
+        });
+        assert!(poisoned.load(atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn completed_cancellation_guard_preserves_connection() {
+        let poisoned = Arc::new(AtomicBool::new(false));
+        let mut guard = CancellationGuard {
+            poisoned: poisoned.clone(),
+            armed: true,
+            cancellation: None,
+        };
+        guard.disarm();
+        drop(guard);
+        assert!(!poisoned.load(atomic::Ordering::Acquire));
     }
 }

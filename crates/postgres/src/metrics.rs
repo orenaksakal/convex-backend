@@ -200,6 +200,27 @@ pub fn log_poisoned_connection() {
     POSTGRES_POISONED_CONNECTIONS.inc();
 }
 
+register_convex_counter!(
+    POSTGRES_CANCELLATION_REQUESTED_TOTAL,
+    "Number of Postgres operation cancellations requested after local future cancellation",
+);
+pub fn log_postgres_cancellation_requested() {
+    POSTGRES_CANCELLATION_REQUESTED_TOTAL.inc();
+}
+
+register_convex_counter!(
+    POSTGRES_CANCELLATION_TERMINAL_TOTAL,
+    "Terminal outcomes of Postgres operation cancellation requests",
+    &["outcome"],
+);
+pub fn log_postgres_cancellation_terminal(outcome: &'static str) {
+    log_counter_with_labels(
+        &POSTGRES_CANCELLATION_TERMINAL_TOTAL,
+        1,
+        vec![StaticMetricLabel::new("outcome", outcome)],
+    );
+}
+
 register_convex_histogram!(
     POSTGRES_POOL_ACTIVE_CONNECTIONS,
     "Number of active connections",

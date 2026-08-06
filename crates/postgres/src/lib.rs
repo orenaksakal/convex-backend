@@ -755,7 +755,7 @@ impl Persistence for PostgresPersistence {
             .await?;
 
         'outer: loop {
-            let sink = conn.copy_in(&stmt).await?;
+            let (sink, mut cancellation_guard) = conn.copy_in(&stmt).await?;
             let types = [
                 Type::TEXT,
                 Type::BYTEA,
@@ -799,11 +799,13 @@ impl Persistence for PostgresPersistence {
 
                 if batch_count >= ROWS_PER_COPY_BATCH {
                     writer.finish().await?;
+                    cancellation_guard.disarm();
                     continue 'outer;
                 }
             }
 
             writer.finish().await?;
+            cancellation_guard.disarm();
             break;
         }
 
@@ -824,7 +826,7 @@ impl Persistence for PostgresPersistence {
             .await?;
 
         'outer: loop {
-            let sink = conn.copy_in(&stmt).await?;
+            let (sink, mut cancellation_guard) = conn.copy_in(&stmt).await?;
             let types = [
                 Type::TEXT,
                 Type::BYTEA,
@@ -865,11 +867,13 @@ impl Persistence for PostgresPersistence {
 
                 if batch_count >= ROWS_PER_COPY_BATCH {
                     writer.finish().await?;
+                    cancellation_guard.disarm();
                     continue 'outer;
                 }
             }
 
             writer.finish().await?;
+            cancellation_guard.disarm();
             break;
         }
 

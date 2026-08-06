@@ -1502,7 +1502,9 @@ mod tests {
             log_lines: vec![].into(),
             journal: QueryJournal::new(),
             audit_log_lines: vec![].into(),
-            result: Ok(JsonPackedValue::pack(ConvexValue::Null)),
+            result: Ok(JsonPackedValue::pack(PendingValue::Concrete(
+                ConvexValue::Null,
+            ))),
             syscall_trace: udf::SyscallTrace::new(),
             udf_server_version: None,
             memory_in_mb: 0,
@@ -1512,6 +1514,7 @@ mod tests {
             outcome: Arc::new(outcome),
             original_ts,
             token: Token::empty(original_ts),
+            visibility_info: None,
         }
     }
 

@@ -31,6 +31,10 @@ use common::{
 };
 use database::IndexModel;
 use http::StatusCode;
+use metrics::{
+    prometheus::TextEncoder,
+    CONVEX_METRICS_REGISTRY,
+};
 use model::{
     config::types::ModuleConfig,
     virtual_system_mapping,
@@ -288,11 +292,92 @@ pub async fn check_admin_key(
     })))
 }
 
+/// Get bounded self-hosted runtime metrics
+///
+/// Returns only context-reuse, degradable-query, and database-cancellation
+/// metric families. SQL, function names, query IDs, arguments, and identities
+/// are never included.
+#[utoipa::path(
+    get,
+    path = "/self_hosted_runtime_metrics",
+    responses((status = 200, body = serde_json::Value)),
+    tag = "public_api"
+)]
+pub async fn self_hosted_runtime_metrics(
+    MtState(_st): MtState<LocalAppState>,
+    ExtractIdentity(identity): ExtractIdentity,
+) -> Result<impl IntoResponse, HttpResponseError> {
+    identity.require_operation(keybroker::DeploymentOp::ViewMetrics)?;
+    ::metrics::spawn_sweep_task(None);
+    let families = CONVEX_METRICS_REGISTRY
+        .gather()
+        .into_iter()
+        .filter(|family| is_self_hosted_runtime_metric(family.name()))
+        .collect::<Vec<_>>();
+    let exposition = TextEncoder::new()
+        .encode_to_string(&families)
+        .map_err(anyhow::Error::from)?;
+    Ok(Json(json!({
+        "observedAtUnixMs": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(anyhow::Error::from)?
+            .as_millis(),
+        "exposition": exposition,
+        "familyCount": families.len(),
+    })))
+}
+
+fn is_self_hosted_runtime_metric(name: &str) -> bool {
+    matches!(
+        name,
+        "isolate_scheduler_context_affinity_total"
+            | "reusable_context_init_total"
+            | "database_udf_context_reuse_lookup_total"
+            | "database_udf_context_reuse_decision_total"
+            | "isolate_context_cache_operations_total"
+            | "isolate_context_cache_cleared_total"
+            | "isolate_context_cache_entries_info"
+            | "isolate_context_cache_capacity_info"
+            | "isolate_context_cache_owned_info"
+            | "sync_degradable_query_workload_decisions_total"
+            | "sync_degradable_query_pressure_lifecycle_total"
+            | "sync_degradable_query_pressure_pending_queries"
+            | "sync_degradable_query_retry_attempts_total"
+            | "sync_degradable_query_retry_queries"
+            | "sync_degradable_query_client_retry_total"
+            | "sync_degradable_query_deferrals_total"
+            | "postgres_cancellation_requested_total"
+            | "postgres_cancellation_terminal_total"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
 
-    use super::snapshot_checkpoint_repair_execute_enabled_from;
+    use super::{
+        is_self_hosted_runtime_metric,
+        snapshot_checkpoint_repair_execute_enabled_from,
+    };
+
+    #[test]
+    fn self_hosted_runtime_metrics_are_explicitly_allowlisted() {
+        assert!(is_self_hosted_runtime_metric(
+            "isolate_context_cache_operations_total"
+        ));
+        assert!(is_self_hosted_runtime_metric(
+            "sync_degradable_query_pressure_lifecycle_total"
+        ));
+        assert!(is_self_hosted_runtime_metric(
+            "postgres_cancellation_terminal_total"
+        ));
+        assert!(!is_self_hosted_runtime_metric(
+            "function_context_cache_arguments_total"
+        ));
+        assert!(!is_self_hosted_runtime_metric(
+            "mysql_cancellation_requested_total"
+        ));
+    }
 
     #[test]
     fn destructive_checkpoint_repair_is_exact_opt_in() {
@@ -385,6 +470,7 @@ where
 {
     OpenApiRouter::new()
         .routes(utoipa_axum::routes!(check_admin_key))
+        .routes(utoipa_axum::routes!(self_hosted_runtime_metrics))
         .routes(utoipa_axum::routes!(shapes2))
         .routes(utoipa_axum::routes!(get_indexes))
         .routes(utoipa_axum::routes!(delete_tables))
