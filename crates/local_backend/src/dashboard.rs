@@ -34,6 +34,7 @@ use http::StatusCode;
 use metrics::{
     prometheus::TextEncoder,
     CONVEX_METRICS_REGISTRY,
+    SERVICE_NAME,
 };
 use model::{
     config::types::ModuleConfig,
@@ -328,6 +329,14 @@ pub async fn self_hosted_runtime_metrics(
 }
 
 fn is_self_hosted_runtime_metric(name: &str) -> bool {
+    let service_prefix = format!("{}_", &*SERVICE_NAME);
+    let Some(name) = name.strip_prefix(&service_prefix) else {
+        return false;
+    };
+    is_allowed_self_hosted_runtime_metric(name)
+}
+
+fn is_allowed_self_hosted_runtime_metric(name: &str) -> bool {
     matches!(
         name,
         "isolate_scheduler_context_affinity_total"
@@ -356,26 +365,30 @@ mod tests {
     use std::ffi::OsStr;
 
     use super::{
+        is_allowed_self_hosted_runtime_metric,
         is_self_hosted_runtime_metric,
         snapshot_checkpoint_repair_execute_enabled_from,
     };
 
     #[test]
     fn self_hosted_runtime_metrics_are_explicitly_allowlisted() {
-        assert!(is_self_hosted_runtime_metric(
+        assert!(is_allowed_self_hosted_runtime_metric(
             "isolate_context_cache_operations_total"
         ));
-        assert!(is_self_hosted_runtime_metric(
+        assert!(is_allowed_self_hosted_runtime_metric(
             "sync_degradable_query_pressure_lifecycle_total"
         ));
-        assert!(is_self_hosted_runtime_metric(
+        assert!(is_allowed_self_hosted_runtime_metric(
             "postgres_cancellation_terminal_total"
         ));
-        assert!(!is_self_hosted_runtime_metric(
+        assert!(!is_allowed_self_hosted_runtime_metric(
             "function_context_cache_arguments_total"
         ));
-        assert!(!is_self_hosted_runtime_metric(
+        assert!(!is_allowed_self_hosted_runtime_metric(
             "mysql_cancellation_requested_total"
+        ));
+        assert!(!is_self_hosted_runtime_metric(
+            "wrong_service_isolate_context_cache_operations_total"
         ));
     }
 
