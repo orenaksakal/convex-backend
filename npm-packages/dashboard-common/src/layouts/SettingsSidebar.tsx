@@ -64,9 +64,9 @@ export function SettingsSidebar({
           const showInCloudDashboard =
             page === "backups" && isCloudDeploymentInSelfHostedDashboard;
           const isUnavailableForSelfHosted =
-            (page === "backups" || page === "custom-domains") &&
-            isSelfHostedDeployment;
+            page === "custom-domains" && isSelfHostedDeployment;
           const isUnavailableForLocal =
+            !isSelfHostedDeployment &&
             (page === "backups" || page === "custom-domains") &&
             deployment?.kind === "local";
 
@@ -97,61 +97,63 @@ export function SettingsSidebar({
             </SidebarLink>
           );
         })}
-        <div className="flex flex-col gap-2 border-t py-2">
-          <SidebarLink
-            href={
-              isCloudDeploymentInSelfHostedDashboard
-                ? `https://dashboard.convex.dev/dp/${deploymentName}/settings`
-                : `${projectsURI}/settings`
-            }
-            Icon={GearIcon}
-            isActive={false}
-            disabled={isSelfHostedDeployment}
-            tip={
-              isSelfHostedDeployment
-                ? "Project settings are not available in self-hosted deployments."
-                : undefined
-            }
-            target={
-              isCloudDeploymentInSelfHostedDashboard ? "_blank" : undefined
-            }
-          >
-            <div className="flex items-center justify-between gap-2">
-              Project Settings
-              <ExternalLinkIcon />
-            </div>
-          </SidebarLink>
-          <SidebarLink
-            href={
-              isCloudDeploymentInSelfHostedDashboard
-                ? `https://dashboard.convex.dev/dp/${deploymentName}/usage`
-                : `${teamsURI}/settings/usage`
-            }
-            Icon={PieChartIcon}
-            query={
-              isCloudDeploymentInSelfHostedDashboard
-                ? {}
-                : {
-                    projectSlug: project?.slug ?? "",
-                  }
-            }
-            isActive={false}
-            disabled={isSelfHostedDeployment}
-            tip={
-              isSelfHostedDeployment
-                ? "Project usage is not available in self-hosted deployments."
-                : undefined
-            }
-            target={
-              isCloudDeploymentInSelfHostedDashboard ? "_blank" : undefined
-            }
-          >
-            <div className="flex items-center justify-between gap-2">
-              Project Usage
-              <ExternalLinkIcon />
-            </div>
-          </SidebarLink>
-        </div>
+        {!isSelfHostedDeployment && (
+          <div className="flex flex-col gap-2 border-t py-2">
+            <SidebarLink
+              href={
+                isCloudDeploymentInSelfHostedDashboard
+                  ? `https://dashboard.convex.dev/dp/${deploymentName}/settings`
+                  : `${projectsURI}/settings`
+              }
+              Icon={GearIcon}
+              isActive={false}
+              disabled={isSelfHostedDeployment}
+              tip={
+                isSelfHostedDeployment
+                  ? "Project settings are not available in self-hosted deployments."
+                  : undefined
+              }
+              target={
+                isCloudDeploymentInSelfHostedDashboard ? "_blank" : undefined
+              }
+            >
+              <div className="flex items-center justify-between gap-2">
+                Project Settings
+                <ExternalLinkIcon />
+              </div>
+            </SidebarLink>
+            <SidebarLink
+              href={
+                isCloudDeploymentInSelfHostedDashboard
+                  ? `https://dashboard.convex.dev/dp/${deploymentName}/usage`
+                  : `${teamsURI}/settings/usage`
+              }
+              Icon={PieChartIcon}
+              query={
+                isCloudDeploymentInSelfHostedDashboard
+                  ? {}
+                  : {
+                      projectSlug: project?.slug ?? "",
+                    }
+              }
+              isActive={false}
+              disabled={isSelfHostedDeployment}
+              tip={
+                isSelfHostedDeployment
+                  ? "Project usage is not available in self-hosted deployments."
+                  : undefined
+              }
+              target={
+                isCloudDeploymentInSelfHostedDashboard ? "_blank" : undefined
+              }
+            >
+              <div className="flex items-center justify-between gap-2">
+                Project Usage
+                <ExternalLinkIcon />
+              </div>
+            </SidebarLink>
+          </div>
+        )}
       </div>
     </>
   );
@@ -159,7 +161,9 @@ export function SettingsSidebar({
 
 function useAllowedPages() {
   const { nents } = useNents();
-  const { usageLimitsEnabled } = useContext(DeploymentInfoContext);
+  const { isSelfHosted, usageLimitsEnabled } = useContext(
+    DeploymentInfoContext,
+  );
 
   let pages = DEPLOYMENT_SETTINGS_PAGES;
 
@@ -167,7 +171,20 @@ function useAllowedPages() {
     pages = pages.filter((d) => d !== "components");
   }
 
-  pages = pages.filter((d) => d !== "snapshots");
+  if (isSelfHosted) {
+    pages = pages.filter(
+      (page) => page !== "custom-domains" && page !== "usage-limits",
+    );
+  } else {
+    pages = pages.filter(
+      (page) =>
+        page !== "snapshots" &&
+        page !== "runtime" &&
+        page !== "security" &&
+        page !== "releases" &&
+        page !== "alerts",
+    );
+  }
 
   // Usage limits is feature-flagged; hide it from the sidebar when off.
   if (!usageLimitsEnabled) {

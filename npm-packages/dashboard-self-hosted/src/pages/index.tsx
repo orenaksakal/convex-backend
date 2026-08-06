@@ -1,4 +1,6 @@
 import { HealthView } from "@common/features/health/components/HealthView";
+import { DisclosureSection } from "@common/features/health/components/HealthView";
+import { SelfHostedInsights } from "../components/health/SelfHostedInsights";
 
 export default function Page() {
   return (
@@ -9,6 +11,18 @@ export default function Page() {
       )}
       PageWrapper={({ children }) => (
         <div className="scrollbar max-w-full shrink-0 grow overflow-y-auto px-6 pb-4">
+          <DisclosureSection
+            id="insights"
+            title="Insights"
+            defaultOpen
+            closedDescription={
+              <span className="text-xs text-content-secondary">
+                self-hosted buffered and durable-history evidence
+              </span>
+            }
+          >
+            <SelfHostedInsights />
+          </DisclosureSection>
           {children}
         </div>
       )}

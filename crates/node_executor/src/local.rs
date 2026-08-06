@@ -3652,6 +3652,8 @@ mod tests {
     };
 
     use futures::future::join_all;
+    #[cfg(target_os = "linux")]
+    use tokio::sync::oneshot;
     use tokio::{
         io::{
             AsyncReadExt,
@@ -3659,8 +3661,6 @@ mod tests {
         },
         net::UnixListener,
     };
-    #[cfg(target_os = "linux")]
-    use tokio::sync::oneshot;
 
     use super::*;
 

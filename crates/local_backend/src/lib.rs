@@ -10,8 +10,12 @@ use std::{
 };
 
 use ::authentication::{
-    access_token_auth::NullAccessTokenAuth,
+    access_token_auth::{
+        AccessTokenAuth,
+        NullAccessTokenAuth,
+    },
     application_auth::ApplicationAuth,
+    dashboard_access_token::DashboardAccessTokenAuth,
 };
 use ::usage_limits::NoopUsageLimitNotifier;
 use application::{
@@ -378,7 +382,7 @@ pub async fn make_app(
         Arc::new(RedactLogsToClient::new(config.redact_logs_to_client)),
         Arc::new(ApplicationAuth::new(
             key_broker.clone(),
-            Arc::new(NullAccessTokenAuth),
+            dashboard_access_token_auth(&config)?,
             runtime.clone(),
         )),
         QueryCache::new(*UDF_CACHE_MAX_SIZE),
@@ -414,6 +418,35 @@ pub async fn make_app(
     };
 
     Ok(app_state)
+}
+
+fn dashboard_access_token_auth(config: &LocalConfig) -> anyhow::Result<Arc<dyn AccessTokenAuth>> {
+    match std::env::var("CONVEX_SELF_HOSTED_DASHBOARD_TOKEN_SECRET") {
+        Ok(secret) => {
+            let registry_path = std::env::var_os("CONVEX_SELF_HOSTED_DEPLOY_CREDENTIALS_PATH");
+            let usage_path = std::env::var_os("CONVEX_SELF_HOSTED_DEPLOY_CREDENTIAL_USAGE_PATH");
+            match (registry_path, usage_path) {
+                (Some(registry_path), Some(usage_path)) => Ok(Arc::new(
+                    DashboardAccessTokenAuth::new_with_deploy_credentials(
+                        config.name(),
+                        &secret,
+                        registry_path.into(),
+                        usage_path.into(),
+                    )?,
+                )),
+                (None, None) => Ok(Arc::new(DashboardAccessTokenAuth::new(
+                    config.name(),
+                    &secret,
+                )?)),
+                _ => anyhow::bail!(
+                    "CONVEX_SELF_HOSTED_DEPLOY_CREDENTIALS_PATH and \
+                     CONVEX_SELF_HOSTED_DEPLOY_CREDENTIAL_USAGE_PATH must be configured together"
+                ),
+            }
+        },
+        Err(std::env::VarError::NotPresent) => Ok(Arc::new(NullAccessTokenAuth)),
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[derive(Clone)]

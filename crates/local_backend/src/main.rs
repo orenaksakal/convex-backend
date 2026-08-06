@@ -5,6 +5,12 @@ use cmd_util::env::{
     config_service,
     config_tool,
 };
+#[cfg(not(target_os = "linux"))]
+use common::knobs::{
+    LOCAL_BACKEND_MALLOC_TRIM_ENABLED,
+    LOCAL_BACKEND_MEMORY_PRESSURE_SHEDDING_ENABLED,
+    LOCAL_BACKEND_MEMORY_RECLAMATION_ENABLED,
+};
 use common::{
     errors::MainError,
     http::ConvexHttpService,
@@ -20,12 +26,6 @@ use common::{
     types::MemberId,
     version::SERVER_VERSION_STR,
 };
-#[cfg(not(target_os = "linux"))]
-use common::knobs::{
-    LOCAL_BACKEND_MALLOC_TRIM_ENABLED,
-    LOCAL_BACKEND_MEMORY_PRESSURE_SHEDDING_ENABLED,
-    LOCAL_BACKEND_MEMORY_RECLAMATION_ENABLED,
-};
 use db_connection::{
     connect_persistence,
     ConnectPersistenceFlags,
@@ -37,7 +37,6 @@ use futures::{
     },
     FutureExt,
 };
-use function_runner::in_process_function_runner::InProcessFunctionRunner;
 use keybroker::{
     DeploymentSecret,
     KeyBroker,
@@ -209,7 +208,6 @@ async fn run_server_inner(
         )
     };
 
-    InProcessFunctionRunner::<ProdRuntime>::preflight_context_cache_configuration()?;
     let node_executor_config = LocalNodeExecutor::preflight_configuration(
         *NODE_ACTION_USER_TIMEOUT + Duration::from_secs(5),
         memory_reclamation.clone(),

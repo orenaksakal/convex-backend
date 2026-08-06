@@ -1,4 +1,3 @@
-import { ExitIcon } from "@radix-ui/react-icons";
 import React, { ReactNode, ErrorInfo } from "react";
 import { Button } from "@ui/Button";
 import { Sheet } from "@ui/Sheet";
@@ -43,15 +42,13 @@ export class ErrorBoundary extends React.Component<
             )}
             <Button
               className="w-fit"
-              icon={<ExitIcon />}
               size="xs"
               onClick={() => {
-                window.sessionStorage.setItem("adminKey", "");
                 window.location.reload();
               }}
               variant="neutral"
             >
-              Log Out
+              Retry
             </Button>
           </div>
           <Sheet className="max-h-[50vh] w-200 max-w-[80vw] overflow-auto font-mono text-sm">

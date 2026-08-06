@@ -989,12 +989,13 @@ impl<RT: Runtime> Storage for LocalDirStorage<RT> {
         fs::create_dir_all(filepath.parent().expect("Must have parent")).context(
             "LocalDirStorage file creation failed. Perhaps the storage object key isn't valid?",
         )?;
-        let file = File::create(filepath).context(
+        let file = File::create(&filepath).context(
             "LocalDirStorage file creation failed. Perhaps the storage object key isn't valid?",
         )?;
 
         let upload = LocalDirUpload {
             object_key,
+            filepath,
             file: Some(file),
             num_parts: 0,
         };
@@ -1038,9 +1039,10 @@ impl<RT: Runtime> Storage for LocalDirStorage<RT> {
             object_key,
             filepath,
         } = token.try_into()?;
-        let file = OpenOptions::new().append(true).open(filepath)?;
+        let file = OpenOptions::new().append(true).open(&filepath)?;
         let mut upload = LocalDirUpload {
             object_key,
+            filepath,
             file: Some(file),
             num_parts: 0, // unused
         };
@@ -1218,6 +1220,7 @@ impl<RT: Runtime> Storage for LocalDirStorage<RT> {
 
 pub struct LocalDirUpload {
     object_key: ObjectKey,
+    filepath: PathBuf,
     file: Option<File>,
     num_parts: usize,
 }
@@ -1252,7 +1255,16 @@ impl Upload for LocalDirUpload {
     async fn abort(mut self: Box<Self>) -> anyhow::Result<()> {
         anyhow::ensure!(self.file.is_some());
         self.file.take();
-        Ok(())
+        match fs::remove_file(&self.filepath) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| {
+                format!(
+                    "Local dir storage couldn't remove aborted upload {}",
+                    self.filepath.display()
+                )
+            }),
+        }
     }
 
     async fn complete(mut self: Box<Self>) -> anyhow::Result<ObjectKey> {
@@ -1315,6 +1327,7 @@ mod tests {
     use super::{
         local_object_attributes,
         BufferedUpload,
+        LocalDirUpload,
         ObjectKey,
         Upload,
     };
@@ -1462,5 +1475,22 @@ mod tests {
             [5, 5, 5, 1]
         );
         assert_eq!(parts.concat(), b"abcdefghijklmnop");
+    }
+
+    #[tokio::test]
+    async fn local_upload_abort_removes_partial_object() -> anyhow::Result<()> {
+        let temp_dir = tempdir()?;
+        let filepath = temp_dir.path().join("partial.blob");
+        let file = File::create(&filepath)?;
+        let upload = LocalDirUpload {
+            object_key: "partial".try_into()?,
+            filepath: filepath.clone(),
+            file: Some(file),
+            num_parts: 0,
+        };
+
+        Box::new(upload).abort().await?;
+        assert!(!filepath.exists());
+        Ok(())
     }
 }

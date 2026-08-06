@@ -33,6 +33,7 @@ openidconnect = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 sync_types = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -42,6 +43,7 @@ common = { workspace = true, features = ["testing"] }
 errors = { workspace = true, features = ["testing"] }
 keybroker = { workspace = true, features = ["testing"] }
 metrics = { workspace = true, features = ["testing"] }
+tempfile = { workspace = true }
 tokio = { workspace = true }
 
 [lints]

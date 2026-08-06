@@ -7,9 +7,13 @@ import {
   Link2Icon,
 } from "@radix-ui/react-icons";
 import {
+  BellAlertIcon,
   HandRaisedIcon,
   KeyIcon,
+  RocketLaunchIcon,
+  ShieldCheckIcon,
   VariableIcon,
+  WrenchScrewdriverIcon,
 } from "@heroicons/react/24/outline";
 import { PuzzlePieceIcon } from "@common/elements/icons";
 
@@ -22,6 +26,10 @@ export const DEPLOYMENT_SETTINGS_PAGES_AND_NAMES = {
   snapshots: "Snapshot Import & Export",
   components: "Components",
   backups: "Backup & Restore",
+  runtime: "Runtime",
+  security: "Security",
+  releases: "Releases & Recovery",
+  alerts: "Alerts",
   integrations: "Integrations",
 };
 
@@ -42,5 +50,9 @@ export const DEPLOYMENT_SETTINGS_PAGE_ICONS: Record<
   // Same icon as the NentSwitcher.
   components: PuzzlePieceIcon,
   backups: ArchiveIcon,
+  runtime: WrenchScrewdriverIcon,
+  security: ShieldCheckIcon,
+  releases: RocketLaunchIcon,
+  alerts: BellAlertIcon,
   integrations: Link2Icon,
 };

@@ -8,7 +8,7 @@ ARG VERGEN_GIT_COMMIT_TIMESTAMP
 # cargo-chef is used to cache Rust dependencies and build artifacts
 # It creates a recipe of our dependencies first, then builds them in a separate stage
 # This helps avoid rebuilding dependencies when only first-party source code changes
-FROM lukemathwalker/cargo-chef:latest-rust-1 AS chef
+FROM lukemathwalker/cargo-chef:latest-rust-1@sha256:7341ca3ca2726f3249fb227b510ce195fb80d6e584ff8894b68ffa97f1512e62 AS chef
 WORKDIR /tmp
 COPY rust-toolchain .
 # Dummy command to just fetch the toolchain that'll get installed by running `cargo chef`
@@ -29,7 +29,7 @@ RUN --mount=type=cache,id=convex-backend-cargo-git-db,target=/usr/local/cargo/gi
 
 # Build stage: Compiles the Rust backend with all dependencies
 # Uses cargo-chef's recipe from the previous stage for optimal caching
-FROM lukemathwalker/cargo-chef:latest-rust-1 AS build
+FROM lukemathwalker/cargo-chef:latest-rust-1@sha256:7341ca3ca2726f3249fb227b510ce195fb80d6e584ff8894b68ffa97f1512e62 AS build
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Update APT configuration for Docker builds
@@ -189,10 +189,12 @@ EOF
 
 # Final stage: Creates minimal runtime image with only necessary components
 # Uses Ubuntu Noble (24.04) as the base image
-FROM ubuntu:noble
+FROM ubuntu:noble@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
 ARG VERGEN_GIT_SHA
+ARG CONVEX_SELF_HOSTED_COMPATIBILITY_ID=development
 LABEL org.opencontainers.repository=https://github.com/get-convex/convex-backend
 LABEL org.opencontainers.image.revision=${VERGEN_GIT_SHA}
+LABEL io.convex-freedom.compatibility-id=${CONVEX_SELF_HOSTED_COMPATIBILITY_ID}
 
 WORKDIR /convex
 

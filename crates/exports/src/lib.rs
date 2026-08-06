@@ -236,7 +236,14 @@ where
                 requestor,
                 update_progress,
             );
-            let (_, ()) = try_join!(uploader, zipper)?;
+            if let Err(export_error) = try_join!(uploader, zipper) {
+                return match upload.abort().await {
+                    Ok(()) => Err(export_error),
+                    Err(abort_error) => Err(export_error.context(format!(
+                        "also failed to abort incomplete snapshot upload: {abort_error:#}"
+                    ))),
+                };
+            }
             let zip_object_key = upload.complete().await?;
             (zip_object_key, usage)
         },

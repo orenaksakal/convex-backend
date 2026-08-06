@@ -301,9 +301,17 @@ pub struct FileStorageZipMetadata {
 mod tests {
     use anyhow::anyhow;
     use bytes::Bytes;
-    use futures::stream;
+    use futures::{
+        future,
+        poll,
+        stream,
+    };
+    use tokio::sync::Semaphore;
 
-    use super::collect_prefetched_file;
+    use super::{
+        collect_prefetched_file,
+        TrackedPrefetchPermit,
+    };
 
     #[tokio::test]
     async fn prefetched_file_must_match_advertised_size() -> anyhow::Result<()> {
@@ -341,5 +349,22 @@ mod tests {
             .await
             .expect_err("prefetch must preserve storage failures");
         assert!(error.to_string().contains("injected read failure"));
+    }
+
+    #[tokio::test]
+    async fn cancelling_prefetch_releases_its_byte_budget() -> anyhow::Result<()> {
+        let semaphore = Semaphore::new(8);
+        let mut pending_prefetch = Box::pin(async {
+            let permit = semaphore.acquire_many(8).await?;
+            let _tracked_permit = TrackedPrefetchPermit::new(permit, 8);
+            future::pending::<()>().await;
+            anyhow::Ok(())
+        });
+
+        assert!(poll!(&mut pending_prefetch).is_pending());
+        assert_eq!(semaphore.available_permits(), 0);
+        drop(pending_prefetch);
+        assert_eq!(semaphore.available_permits(), 8);
+        Ok(())
     }
 }

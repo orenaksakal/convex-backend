@@ -282,6 +282,14 @@ pub async fn repair_failed_import_from_checkpoints(
         RepairFailedImportFromCheckpointsArgs,
     >,
 ) -> Result<impl IntoResponse, HttpResponseError> {
+    if execute && !crate::dashboard::snapshot_checkpoint_repair_execute_enabled() {
+        return Err(anyhow::anyhow!(ErrorMetadata::forbidden(
+            "SnapshotCheckpointRepairExecuteDisabled",
+            "destructive checkpoint repair is disabled because its production fixture gate has \
+             not passed",
+        ))
+        .into());
+    }
     let import_id = DeveloperDocumentId::decode(&import_id).context(ErrorMetadata::bad_request(
         "InvalidImport",
         format!("invalid import id {import_id}"),

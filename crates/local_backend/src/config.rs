@@ -248,5 +248,4 @@ impl LocalConfig {
             }
         }
     }
-
 }

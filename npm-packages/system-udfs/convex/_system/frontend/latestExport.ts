@@ -11,6 +11,17 @@ export default queryPrivateSystem("ViewBackups")({
   },
 });
 
+export const list = queryPrivateSystem("ViewBackups")({
+  args: {},
+  handler: async function ({ db }): Promise<Export[]> {
+    return await db
+      .query("_exports")
+      .withIndex("by_requestor", (q) => q.eq("requestor", "snapshotExport"))
+      .order("desc")
+      .take(20);
+  },
+});
+
 export const latestCloudExport = queryPrivateSystem("ViewBackups")({
   args: {},
   handler: async function ({ db }): Promise<Export | null> {

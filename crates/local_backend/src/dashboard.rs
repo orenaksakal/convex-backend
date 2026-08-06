@@ -49,6 +49,16 @@ use value::{
     TableNamespace,
 };
 
+pub(crate) fn snapshot_checkpoint_repair_execute_enabled() -> bool {
+    snapshot_checkpoint_repair_execute_enabled_from(
+        std::env::var_os("CONVEX_ENABLE_SNAPSHOT_CHECKPOINT_REPAIR_EXECUTE").as_deref(),
+    )
+}
+
+fn snapshot_checkpoint_repair_execute_enabled_from(value: Option<&std::ffi::OsStr>) -> bool {
+    value == Some(std::ffi::OsStr::new("true"))
+}
+
 use crate::{
     admin::must_be_admin_from_key,
     authentication::ExtractIdentity,
@@ -266,11 +276,37 @@ pub async fn check_admin_key(
         .iter()
         .map(|op| serde_json::to_value(op).unwrap())
         .collect();
+    let compatibility_id = std::env::var("CONVEX_SELF_HOSTED_COMPATIBILITY_ID").ok();
     Ok(Json(json!({
         "success": true,
         "allowedOps": serialized_ops,
         "isReadOnly": is_read_only,
+        "compatibilityId": compatibility_id,
+        "capabilities": {
+            "snapshotCheckpointRepairExecute": snapshot_checkpoint_repair_execute_enabled(),
+        },
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use super::snapshot_checkpoint_repair_execute_enabled_from;
+
+    #[test]
+    fn destructive_checkpoint_repair_is_exact_opt_in() {
+        assert!(!snapshot_checkpoint_repair_execute_enabled_from(None));
+        assert!(!snapshot_checkpoint_repair_execute_enabled_from(Some(
+            OsStr::new("1")
+        )));
+        assert!(!snapshot_checkpoint_repair_execute_enabled_from(Some(
+            OsStr::new("TRUE")
+        )));
+        assert!(snapshot_checkpoint_repair_execute_enabled_from(Some(
+            OsStr::new("true")
+        )));
+    }
 }
 
 #[derive(Deserialize, ToSchema)]

@@ -342,7 +342,6 @@ impl<RT: Runtime> MySqlPersistence<RT> {
             .await?
             .is_none())
     }
-
 }
 
 #[async_trait]

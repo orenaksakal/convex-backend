@@ -43,6 +43,7 @@ use sync_types::AuthenticationToken;
 
 pub mod access_token_auth;
 pub mod application_auth;
+pub mod dashboard_access_token;
 pub mod metrics;
 
 fn redact_jwt_error_if_needed(error_msg: &str) -> String {

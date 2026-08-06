@@ -12,6 +12,10 @@ const MAX_RETRIES_DELAY_MS = 500;
 export type CheckDeploymentResult = {
   allowedOps: string[];
   isReadOnly: boolean;
+  compatibilityId: string | null;
+  capabilities: {
+    snapshotCheckpointRepairExecute: boolean;
+  };
 } | null;
 
 export async function checkDeploymentInfo(
@@ -35,18 +39,43 @@ export async function checkDeploymentInfo(
       if (resp.ok) {
         try {
           const body = await resp.json();
+          if (
+            !Array.isArray(body.allowedOps) ||
+            !body.allowedOps.every((operation: unknown) =>
+              typeof operation === "string"
+            ) ||
+            typeof body.isReadOnly !== "boolean" ||
+            !(
+              body.compatibilityId === null ||
+              typeof body.compatibilityId === "string"
+            ) ||
+            body.capabilities === null ||
+            typeof body.capabilities !== "object" ||
+            typeof body.capabilities.snapshotCheckpointRepairExecute !==
+              "boolean"
+          ) {
+            return null;
+          }
+          const requiredCompatibilityId =
+            process.env.NEXT_PUBLIC_CONVEX_SELF_HOSTED_COMPATIBILITY_ID;
+          if (
+            requiredCompatibilityId &&
+            body.compatibilityId !== requiredCompatibilityId
+          ) {
+            return null;
+          }
           return {
-            allowedOps: body.allowedOps ?? [],
-            isReadOnly: body.isReadOnly ?? false,
+            allowedOps: body.allowedOps,
+            isReadOnly: body.isReadOnly,
+            compatibilityId: body.compatibilityId,
+            capabilities: {
+              snapshotCheckpointRepairExecute:
+                body.capabilities.snapshotCheckpointRepairExecute,
+            },
           };
         } catch {
-          // Old backend that doesn't return JSON with allowedOps
-          return { allowedOps: [], isReadOnly: false };
+          return null;
         }
-      }
-      if (resp.status === 404) {
-        // Endpoint doesn't exist on this backend — allow all operations
-        return { allowedOps: [], isReadOnly: false };
       }
     } catch {
       // Do nothing

@@ -441,7 +441,12 @@ export default defineSchema({
         state: v.literal("requested"),
         requestor: exportRequestor,
       }),
-      // TODO: add canceled
+      v.object({
+        state: v.literal("canceled"),
+        start_ts: v.union(v.int64(), v.null()),
+        canceled_ts: v.int64(),
+        requestor: exportRequestor,
+      }),
     ),
   ).index("by_requestor", ["requestor"]),
   _deployment_audit_log: deploymentAuditLogTable,

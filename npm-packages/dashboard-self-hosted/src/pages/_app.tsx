@@ -6,23 +6,20 @@ import { AppProps } from "next/app";
 import Head from "next/head";
 import { useQuery } from "convex/react";
 import udfs from "@common/udfs";
-import { useSessionStorage } from "react-use";
-import { ExitIcon, GearIcon } from "@radix-ui/react-icons";
+import { GearIcon } from "@radix-ui/react-icons";
 import { ConvexLogo } from "@common/elements/ConvexLogo";
 import { ToastContainer } from "@common/elements/ToastContainer";
 import { ThemeConsumer } from "@common/elements/ThemeConsumer";
 import { Favicon } from "@common/elements/Favicon";
 import { ToggleTheme } from "@common/elements/ToggleTheme";
 import { SelfHostedDisconnectOverlay } from "@common/features/disconnectOverlay/SelfHostedDisconnectOverlay";
-import { Menu, MenuItem } from "@ui/Menu";
+import { Menu } from "@ui/Menu";
 import { ThemeProvider } from "next-themes";
 import React, {
-  useCallback,
-  useContext,
   useEffect,
   useMemo,
   useState,
-  createContext,
+  useContext,
 } from "react";
 import { ErrorBoundary } from "components/ErrorBoundary";
 import { DeploymentDashboardLayout } from "@common/layouts/DeploymentDashboardLayout";
@@ -33,28 +30,26 @@ import {
   DeploymentInfoContext,
 } from "@common/lib/deploymentContext";
 import { Tooltip } from "@ui/Tooltip";
-import { DeploymentCredentialsForm } from "components/DeploymentCredentialsForm";
-import { DeploymentList } from "components/DeploymentList";
 import { checkDeploymentInfo } from "lib/checkDeploymentInfo";
-import {
-  CurrentDeployment,
-  fetchCurrentDeployment,
-} from "lib/fetchCurrentDeployment";
 import { ConvexCloudReminderToast } from "components/ConvexCloudReminderToast";
-import { z } from "zod";
 import { UIProvider } from "@ui/UIContext";
 import Link from "next/link";
+import { SelfHostedCommandPalette } from "components/SelfHostedCommandPalette";
+import {
+  OperatorConfiguration,
+  operatorGet,
+  operatorMutation,
+} from "lib/operatorApi";
+import { Button } from "@ui/Button";
+import {
+  BackendCapabilitiesContext,
+  SelfHostedBackendCapabilities,
+} from "lib/backendCapabilities";
+import { SelfHostedSettingsContext } from "lib/selfHostedSettings";
 
 if (process.env.NEXT_PUBLIC_LOAD_MONACO_INTERNALLY === "true") {
   import("../lib/monacoInternalLoader").then((a) => a).catch(console.error);
 }
-
-// Context for self-hosted dashboard sidebar settings
-const SelfHostedSettingsContext = createContext<{
-  visiblePages?: string[];
-}>({
-  visiblePages: undefined,
-});
 
 /**
  * Wrapper component that consumes SelfHostedSettingsContext and passes
@@ -78,15 +73,11 @@ function App({
   Component,
   pageProps: {
     deploymentUrl,
-    adminKey,
-    defaultListDeploymentsApiUrl,
     ...pageProps
   },
 }: AppProps & {
   pageProps: {
     deploymentUrl: string | null;
-    adminKey: string | null;
-    defaultListDeploymentsApiUrl: string | null;
   };
 }) {
   return (
@@ -101,11 +92,7 @@ function App({
           <ThemeConsumer />
           <ToastContainer />
           <div className="flex h-screen flex-col">
-            <DeploymentInfoProvider
-              deploymentUrl={deploymentUrl}
-              adminKey={adminKey}
-              defaultListDeploymentsApiUrl={defaultListDeploymentsApiUrl}
-            >
+            <DeploymentInfoProvider deploymentUrl={deploymentUrl}>
               <DeploymentApiProvider deploymentOverride="local">
                 <WaitForDeploymentApi>
                   <DeploymentDashboardLayoutWrapper>
@@ -123,14 +110,6 @@ function App({
     </>
   );
 }
-
-// Whether to try fetching the deployment credentials from the
-// /api/current_deployment endpoint served by the CLI in anonymous mode.
-// Inlined at build time by Next.js; set in the `build:export` script.
-const USE_CURRENT_DEPLOYMENT_API =
-  process.env.NEXT_PUBLIC_USE_CURRENT_DEPLOYMENT_API === "true";
-
-const SESSION_STORAGE_DEPLOYMENT_NAME_KEY = "deploymentName";
 
 function normalizeUrl(url: string) {
   try {
@@ -152,26 +131,9 @@ App.getInitialProps = async ({ ctx }: { ctx: { req?: any } }) => {
     if (process.env.NEXT_PUBLIC_DEPLOYMENT_URL) {
       deploymentUrl = normalizeUrl(process.env.NEXT_PUBLIC_DEPLOYMENT_URL);
     }
-    let adminKey: string | null = null;
-    if (process.env.NEXT_PUBLIC_ADMIN_KEY) {
-      adminKey = process.env.NEXT_PUBLIC_ADMIN_KEY;
-    }
-
-    const listDeploymentsApiPort =
-      process.env.NEXT_PUBLIC_DEFAULT_LIST_DEPLOYMENTS_API_PORT;
-    let listDeploymentsApiUrl: string | null = null;
-    if (listDeploymentsApiPort) {
-      const port = parseInt(listDeploymentsApiPort);
-      if (!Number.isNaN(port)) {
-        listDeploymentsApiUrl = normalizeUrl(`http://127.0.0.1:${port}`);
-      }
-    }
-
     return {
       pageProps: {
         deploymentUrl,
-        adminKey,
-        defaultListDeploymentsApiUrl: listDeploymentsApiUrl,
       },
     };
   }
@@ -179,18 +141,9 @@ App.getInitialProps = async ({ ctx }: { ctx: { req?: any } }) => {
   // On client-side navigation, get from window.__NEXT_DATA__
   const clientSideDeploymentUrl =
     window.__NEXT_DATA__?.props?.pageProps?.deploymentUrl ?? null;
-  const clientSideAdminKey =
-    window.__NEXT_DATA__?.props?.pageProps?.adminKey ?? null;
-  const clientSideListDeploymentsApiUrl =
-    window.__NEXT_DATA__?.props?.pageProps?.listDeploymentsApiUrl ?? null;
-  const clientSideSelectedDeploymentName =
-    window.__NEXT_DATA__?.props?.pageProps?.selectedDeploymentName ?? null;
   return {
     pageProps: {
       deploymentUrl: clientSideDeploymentUrl ?? null,
-      adminKey: clientSideAdminKey ?? null,
-      defaultListDeploymentsApiUrl: clientSideListDeploymentsApiUrl ?? null,
-      selectedDeploymentName: clientSideSelectedDeploymentName ?? null,
     },
   };
 };
@@ -230,13 +183,9 @@ const deploymentInfo: Omit<DeploymentInfo, "deploymentUrl" | "adminKey"> = {
     teamId: 0,
   }),
   useCurrentDeployment: () => {
-    const [storedDeploymentName] = useSessionStorage(
-      SESSION_STORAGE_DEPLOYMENT_NAME_KEY,
-      "",
-    );
     return {
       id: 0,
-      name: storedDeploymentName,
+      name: "self-hosted",
       deploymentType: "dev",
       projectId: 0,
       kind: "local",
@@ -332,183 +281,160 @@ const deploymentInfo: Omit<DeploymentInfo, "deploymentUrl" | "adminKey"> = {
 function DeploymentInfoProvider({
   children,
   deploymentUrl,
-  adminKey,
-  defaultListDeploymentsApiUrl,
 }: {
   children: React.ReactNode;
   deploymentUrl: string | null;
-  adminKey: string | null;
-  defaultListDeploymentsApiUrl: string | null;
 }) {
-  const [listDeploymentsApiUrl, setListDeploymentsApiUrl] = useState<
-    string | null
-  >(null);
-  const [selectedDeploymentName, setSelectedDeploymentName] = useState<
-    string | null
-  >(null);
-  const [isValidDeploymentInfo, setIsValidDeploymentInfo] = useState<
-    boolean | null
-  >(null);
-  const [storedAdminKey, setStoredAdminKey] = useSessionStorage("adminKey", "");
-  const [storedDeploymentUrl, setStoredDeploymentUrl] = useSessionStorage(
-    "deploymentUrl",
-    "",
+  const [credential, setCredential] = useState<DashboardCredential | null>(
+    null,
   );
-  const [_storedDeploymentName, setStoredDeploymentName] = useSessionStorage(
-    SESSION_STORAGE_DEPLOYMENT_NAME_KEY,
-    "",
-  );
+  const [credentialError, setCredentialError] = useState<Error | null>(null);
+  const [credentialGeneration, setCredentialGeneration] = useState(0);
   const [visiblePages, setVisiblePages] = useState<string[] | undefined>(
     undefined,
   );
-  const [allowedOps, setAllowedOps] = useState<string[]>([]);
+  const [dashboardEditConfirmation, setDashboardEditConfirmation] =
+    useState(true);
+  const [backendCapabilities, setBackendCapabilities] =
+    useState<SelfHostedBackendCapabilities>({
+      snapshotCheckpointRepairExecute: false,
+    });
 
   // Memoize this so it can safely be passed into the context
   const settingsContextValue = useMemo(
-    () => ({ visiblePages }),
-    [visiblePages],
+    () => ({
+      visiblePages,
+      dashboardEditConfirmation,
+      setDashboardEditConfirmation,
+    }),
+    [dashboardEditConfirmation, visiblePages],
   );
 
-  const attemptLogin = useCallback(
-    async ({
-      submittedAdminKey,
-      submittedDeploymentUrl,
-      submittedDeploymentName,
-      submittedVisiblePages,
-    }: {
-      submittedAdminKey: string;
-      submittedDeploymentUrl: string;
-      submittedDeploymentName: string;
-      submittedVisiblePages?: string[];
-    }) => {
-      const result = await checkDeploymentInfo(
-        submittedAdminKey,
-        submittedDeploymentUrl,
-      );
-      if (result === null) {
-        setIsValidDeploymentInfo(false);
-        return;
-      }
-      setIsValidDeploymentInfo(true);
-      setAllowedOps(result.allowedOps);
-      setStoredAdminKey(submittedAdminKey);
-      setStoredDeploymentUrl(submittedDeploymentUrl);
-      setStoredDeploymentName(submittedDeploymentName);
-      setVisiblePages(submittedVisiblePages);
-    },
-    [setStoredAdminKey, setStoredDeploymentUrl, setStoredDeploymentName],
-  );
-
-  useEmbeddedDashboardCredentials(attemptLogin);
-
-  // `undefined` while the request to /api/current_deployment is in flight,
-  // `null` once it has failed (e.g. 404 → fall back to the other mechanisms).
-  const [currentDeployment, setCurrentDeployment] = useState<
-    CurrentDeployment | null | undefined
-  >(USE_CURRENT_DEPLOYMENT_API ? undefined : null);
   useEffect(() => {
-    if (!USE_CURRENT_DEPLOYMENT_API) {
+    let active = true;
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    let currentCredential: DashboardCredential | null = null;
+    if (!deploymentUrl) {
+      setCredentialError(
+        new Error("NEXT_PUBLIC_DEPLOYMENT_URL is required for this dashboard"),
+      );
       return;
     }
-    void fetchCurrentDeployment().then((deployment) => {
-      setCurrentDeployment(deployment);
-      if (deployment) {
-        void attemptLogin({
-          submittedAdminKey: deployment.adminKey,
-          submittedDeploymentUrl:
-            normalizeUrl(deployment.url) ?? deployment.url,
-          submittedDeploymentName: deployment.name,
-        });
+
+    const issue = async () => {
+      try {
+        const [issued, configurationResponse] = await Promise.all([
+          operatorMutation<DashboardCredential>(
+            "/v1/dashboard-token",
+            "POST",
+          ),
+          operatorGet<{ configuration: OperatorConfiguration }>(
+            "/v1/configuration",
+          ),
+        ]);
+        const expiresAt = Date.parse(issued.expiresAt);
+        if (!Number.isFinite(expiresAt) || expiresAt <= Date.now() + 60_000) {
+          throw new Error("Operator issued an already-expired dashboard token");
+        }
+        const checked = await checkDeploymentInfo(issued.token, deploymentUrl);
+        if (!checked) {
+          throw new Error(
+            "The backend rejected the short-lived dashboard credential",
+          );
+        }
+        if (!sameOperations(checked.allowedOps, issued.allowedOps)) {
+          throw new Error(
+            "Backend and operator disagree about dashboard token operations",
+          );
+        }
+        if (!active) return;
+        currentCredential = issued;
+        setCredential(issued);
+        setBackendCapabilities(checked.capabilities);
+        setDashboardEditConfirmation(
+          configurationResponse.configuration.security
+            .dashboardEditConfirmation ?? true,
+        );
+        setCredentialError(null);
+        setVisiblePages(undefined);
+        refreshTimer = setTimeout(
+          () => void issue(),
+          Math.max(10_000, expiresAt - Date.now() - 60_000),
+        );
+      } catch (error) {
+        if (!active) return;
+        setCredentialError(asError(error));
+        const currentExpiresAt = currentCredential
+          ? Date.parse(currentCredential.expiresAt)
+          : Number.NaN;
+        if (
+          currentCredential &&
+          Number.isFinite(currentExpiresAt) &&
+          currentExpiresAt > Date.now() + 5_000
+        ) {
+          refreshTimer = setTimeout(
+            () => void issue(),
+            Math.max(
+              1_000,
+              Math.min(10_000, currentExpiresAt - Date.now() - 5_000),
+            ),
+          );
+        } else {
+          currentCredential = null;
+          setCredential(null);
+          setBackendCapabilities({
+            snapshotCheckpointRepairExecute: false,
+          });
+        }
       }
-    });
-  }, [attemptLogin]);
+    };
+    void issue();
+    return () => {
+      active = false;
+      if (refreshTimer) clearTimeout(refreshTimer);
+    };
+  }, [credentialGeneration, deploymentUrl]);
 
   const finalValue: DeploymentInfo = useMemo(
     () =>
       ({
         ...deploymentInfo,
         ok: true,
-        adminKey: storedAdminKey,
-        deploymentUrl: storedDeploymentUrl,
-        useIsOperationAllowed: (operation: string) => {
-          // Empty allowedOps means all operations are allowed (full admin key).
-          if (allowedOps.length === 0) return true;
-          return allowedOps.includes(operation);
-        },
+        adminKey: credential?.token ?? "",
+        deploymentUrl: deploymentUrl ?? "",
+        useIsOperationAllowed: (operation: string) =>
+          credential?.allowedOps.includes(operation) ?? false,
+        useIsProtectedDeployment: () => dashboardEditConfirmation,
       }) as DeploymentInfo,
-    [storedAdminKey, storedDeploymentUrl, allowedOps],
+    [credential, dashboardEditConfirmation, deploymentUrl],
   );
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
 
-  // Pre-1.41.0 CLI versions had a “list deployments” API server allowing the
-  // dashboard to find the list of anonymous backends and show it on screen (<DeploymentList />).
-  // URL parameters, e.g. ?a=6791&d=anonymous-projectName, were used to automatically open
-  // the dashboard for a given deployment.
-  // This workflow isn’t used in CLI versions ≥1.41.0, but we keep it for backwards compatibility.
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      const LIST_DEPLOYMENTS_API_PORT_QUERY_PARAM = "a";
-      const SELECTED_DEPLOYMENT_NAME_QUERY_PARAM = "d";
-
-      const url = new URL(window.location.href);
-      const listDeploymentsApiPort = url.searchParams.get(
-        LIST_DEPLOYMENTS_API_PORT_QUERY_PARAM,
-      );
-      const selectedDeploymentNameFromUrl = url.searchParams.get(
-        SELECTED_DEPLOYMENT_NAME_QUERY_PARAM,
-      );
-      url.searchParams.delete(LIST_DEPLOYMENTS_API_PORT_QUERY_PARAM);
-      url.searchParams.delete(SELECTED_DEPLOYMENT_NAME_QUERY_PARAM);
-      window.history.replaceState({}, "", url.toString());
-      if (listDeploymentsApiPort) {
-        if (!Number.isNaN(parseInt(listDeploymentsApiPort))) {
-          setListDeploymentsApiUrl(
-            normalizeUrl(`http://127.0.0.1:${listDeploymentsApiPort}`),
-          );
-        }
-      } else {
-        setListDeploymentsApiUrl(defaultListDeploymentsApiUrl);
-      }
-      if (selectedDeploymentNameFromUrl) {
-        setSelectedDeploymentName(selectedDeploymentNameFromUrl);
-      }
-    }
-  }, [defaultListDeploymentsApiUrl]);
-
   if (!mounted) return null;
 
-  if (!isValidDeploymentInfo) {
-    // Wait for /api/current_deployment (and the validation of the credentials
-    // it returns) before falling back, so the deployment list doesn’t flash
-    // while the requests are in flight. If the credentials turn out to be
-    // invalid (isValidDeploymentInfo === false), show the fallback UI.
-    if (currentDeployment !== null && isValidDeploymentInfo === null) {
-      return null;
-    }
+  if (!credential) {
     return (
-      <div className="flex h-screen w-screen flex-col items-center justify-center gap-8">
+      <div className="flex h-screen w-screen flex-col items-center justify-center gap-6 px-6 text-center">
         <ConvexLogo />
-        {listDeploymentsApiUrl !== null ? (
-          <DeploymentList
-            listDeploymentsApiUrl={listDeploymentsApiUrl}
-            onError={() => {
-              setListDeploymentsApiUrl(null);
-            }}
-            onSelect={attemptLogin}
-            selectedDeploymentName={selectedDeploymentName}
-          />
+        {credentialError ? (
+          <div className="max-w-lg rounded-lg border bg-background-secondary p-4">
+            <div className="font-medium">Private dashboard access failed</div>
+            <div className="mt-1 text-sm text-content-secondary">
+              {credentialError.message}
+            </div>
+            <Button
+              className="mt-3"
+              size="sm"
+              variant="neutral"
+              onClick={() => setCredentialGeneration((value) => value + 1)}
+            >
+              Retry credential issuance
+            </Button>
+          </div>
         ) : (
-          <DeploymentCredentialsForm
-            onSubmit={attemptLogin}
-            initialAdminKey={adminKey}
-            initialDeploymentUrl={deploymentUrl}
-          />
-        )}
-        {isValidDeploymentInfo === false && (
           <div className="text-sm text-content-secondary">
-            The deployment URL or admin key is invalid. Please check that you
-            have entered the correct values.
+            Requesting a short-lived credential from the private operator…
           </div>
         )}
       </div>
@@ -516,23 +442,20 @@ function DeploymentInfoProvider({
   }
   return (
     <>
-      <Header
-        onLogout={() => {
-          setStoredAdminKey("");
-          setStoredDeploymentUrl("");
-          setStoredDeploymentName("");
-        }}
-      />
+      <Header />
       <DeploymentInfoContext.Provider value={finalValue}>
-        <SelfHostedSettingsContext.Provider value={settingsContextValue}>
-          <ErrorBoundary>{children}</ErrorBoundary>
-        </SelfHostedSettingsContext.Provider>
+        <BackendCapabilitiesContext.Provider value={backendCapabilities}>
+          <SelfHostedSettingsContext.Provider value={settingsContextValue}>
+            <SelfHostedCommandPalette visiblePages={visiblePages} />
+            <ErrorBoundary>{children}</ErrorBoundary>
+          </SelfHostedSettingsContext.Provider>
+        </BackendCapabilitiesContext.Provider>
       </DeploymentInfoContext.Provider>
     </>
   );
 }
 
-function Header({ onLogout }: { onLogout: () => void }) {
+function Header() {
   if (process.env.NEXT_PUBLIC_HIDE_HEADER) {
     return null;
   }
@@ -551,75 +474,31 @@ function Header({ onLogout }: { onLogout: () => void }) {
         placement="bottom-end"
       >
         <ToggleTheme />
-        <MenuItem action={onLogout}>
-          <div className="flex w-full items-center justify-between">
-            Log Out
-            <ExitIcon className="text-content-secondary" />
-          </div>
-        </MenuItem>
       </Menu>
     </header>
   );
 }
 
-/**
- * Allow the parent window to send credentials to the dashboard.
- * This is used when the dashboard is embedded in another application via an iframe.
- */
-function useEmbeddedDashboardCredentials(
-  attemptLogin: ({
-    submittedAdminKey,
-    submittedDeploymentUrl,
-    submittedDeploymentName,
-    submittedVisiblePages,
-  }: {
-    submittedAdminKey: string;
-    submittedDeploymentUrl: string;
-    submittedDeploymentName: string;
-    submittedVisiblePages?: string[];
-  }) => void,
-) {
-  // Send a message to the parent iframe to request the credentials.
-  // This prevents race conditions where the parent iframe sends the message
-  // before the dashboard loads.
-  useEffect(() => {
-    window.parent.postMessage(
-      {
-        type: "dashboard-credentials-request",
-      },
-      "*",
-    );
-  }, []);
+type DashboardCredential = {
+  token: string;
+  issuedAt: string;
+  expiresAt: string;
+  allowedOps: string[];
+};
 
-  useEffect(() => {
-    const handleMessage = (event: MessageEvent) => {
-      const credentialsSchema = z.object({
-        type: z.literal("dashboard-credentials"),
-        adminKey: z.string(),
-        deploymentUrl: z.string().url(),
-        deploymentName: z.string(),
-        visiblePages: z.array(z.string()).optional(),
-      });
+function sameOperations(left: string[], right: string[]) {
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return (
+    sortedLeft.length === sortedRight.length &&
+    sortedLeft.every(
+      (operation, index) => operation === sortedRight[index],
+    )
+  );
+}
 
-      try {
-        credentialsSchema.parse(event.data);
-      } catch {
-        return;
-      }
-
-      if (event.data.type === "dashboard-credentials") {
-        attemptLogin({
-          submittedAdminKey: event.data.adminKey,
-          submittedDeploymentUrl: event.data.deploymentUrl,
-          submittedDeploymentName: event.data.deploymentName,
-          submittedVisiblePages: event.data.visiblePages,
-        });
-      }
-    };
-
-    window.addEventListener("message", handleMessage);
-    return () => {
-      window.removeEventListener("message", handleMessage);
-    };
-  }, [attemptLogin]);
+function asError(value: unknown) {
+  return value instanceof Error
+    ? value
+    : new Error("Unknown dashboard credential error");
 }
