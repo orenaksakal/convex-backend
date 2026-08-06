@@ -58,7 +58,8 @@ const metadataJsonSchema = z.object({
   moduleEnvironments: z
     .array(z.tuple([modulePathSchema, moduleEnvironmentSchema]))
     .optional(),
-  externalDepsStorageKey: z.string().optional(),
+  // Rust serializes Option::None as null for production source packages.
+  externalDepsStorageKey: z.string().nullish(),
 });
 
 class PackageCacheError extends Error {}
@@ -260,7 +261,7 @@ function parseMetadataFile(contents: string): MetadataJson {
   return {
     modulePaths: metadataJson.modulePaths,
     moduleEnvironments: moduleEnvironmentsMap,
-    externalDepsStorageKey: metadataJson.externalDepsStorageKey,
+    externalDepsStorageKey: metadataJson.externalDepsStorageKey ?? undefined,
   };
 }
 

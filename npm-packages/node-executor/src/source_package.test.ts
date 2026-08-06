@@ -1452,7 +1452,9 @@ function makeSourcePackageZip(
           ["_deps/chunk.js", "node"],
           ["actions/example.js", "node"],
         ],
-        externalDepsStorageKey: externalDepsStorageKey ?? undefined,
+        // Match the Rust source-package writer, which serializes Option::None
+        // as JSON null rather than omitting the field.
+        externalDepsStorageKey,
       }),
     ),
   );
