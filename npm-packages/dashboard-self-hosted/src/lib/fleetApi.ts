@@ -35,6 +35,7 @@ export type FleetDeployment = {
     publicRuntimeEnabled: boolean;
     deploymentDomain?: string;
     siteDomain?: string;
+    applicationDomain?: string;
   };
   deploymentUrl: string | null;
   siteUrl: string | null;
@@ -132,6 +133,7 @@ export function createFleetDeployment(
     isDefault?: boolean;
     deploymentDomain: string;
     siteDomain: string;
+    applicationDomain?: string;
   },
 ) {
   return fleetRequest<{
@@ -164,6 +166,7 @@ export function cloneFleetDeployment(
     isDefault?: boolean;
     deploymentDomain: string;
     siteDomain: string;
+    applicationDomain?: string;
   },
 ) {
   return fleetRequest<{

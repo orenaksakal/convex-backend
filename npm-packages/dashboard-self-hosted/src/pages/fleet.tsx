@@ -738,6 +738,7 @@ function CreateDeploymentModal({
   const [isDefault, setIsDefault] = useState(false);
   const [deploymentDomain, setDeploymentDomain] = useState("");
   const [siteDomain, setSiteDomain] = useState("");
+  const [applicationDomain, setApplicationDomain] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   async function submit(event: FormEvent) {
@@ -750,6 +751,7 @@ function CreateDeploymentModal({
         isDefault: type === "prod" && isDefault,
         deploymentDomain,
         siteDomain,
+        ...(applicationDomain ? { applicationDomain } : {}),
         ...(reference ? { reference } : {}),
       });
       onCreated();
@@ -848,6 +850,19 @@ function CreateDeploymentModal({
               required
             />
           </div>
+          <div className="mt-4">
+            <TextInput
+              id="fleet-application-domain"
+              label="Application domain (optional)"
+              value={applicationDomain}
+              onChange={(event) => setApplicationDomain(event.target.value)}
+              description="Enables audited user impersonation handoffs to the app. Leave blank when this deployment has no application frontend."
+              placeholder="app.example.com"
+              inputMode="url"
+              autoCapitalize="none"
+              spellCheck={false}
+            />
+          </div>
         </div>
         {type === "prod" ? (
           <div className="flex items-start gap-3 rounded-xl border bg-background-primary p-3 text-sm">
@@ -916,6 +931,7 @@ function CloneDeploymentModal({
   const [reference, setReference] = useState(`${deployment.reference}-copy`);
   const [deploymentDomain, setDeploymentDomain] = useState("");
   const [siteDomain, setSiteDomain] = useState("");
+  const [applicationDomain, setApplicationDomain] = useState("");
   const [isDefault, setIsDefault] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -931,6 +947,7 @@ function CloneDeploymentModal({
         reference,
         deploymentDomain,
         siteDomain,
+        ...(applicationDomain ? { applicationDomain } : {}),
         isDefault: deployment.type === "prod" && isDefault,
       });
       onCreated(projectSlug);
@@ -1017,6 +1034,18 @@ function CloneDeploymentModal({
               autoCapitalize="none"
               spellCheck={false}
               required
+            />
+          </div>
+          <div className="mt-4">
+            <TextInput
+              id="fleet-clone-application-domain"
+              label="New application domain (optional)"
+              value={applicationDomain}
+              onChange={(event) => setApplicationDomain(event.target.value)}
+              description="Must identify the new app frontend. It is never inherited from the source deployment."
+              placeholder="app-copy.example.com"
+              autoCapitalize="none"
+              spellCheck={false}
             />
           </div>
         </div>
