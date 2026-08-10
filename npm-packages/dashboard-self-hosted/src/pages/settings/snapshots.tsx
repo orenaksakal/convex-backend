@@ -353,7 +353,7 @@ export default function SnapshotsPage() {
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
             <OperatorField
               label="Snapshot ZIP"
-              description="A Convex ZIP export. Table-level CSV/JSON imports remain available through the CLI."
+              description="A Convex ZIP archive export. Table-level comma-separated value (CSV) and JavaScript Object Notation (JSON) imports remain available through the command-line interface (CLI)."
             >
               <input
                 className={operatorInputClasses}
@@ -621,8 +621,8 @@ function timestampNanos(value: bigint) {
 }
 
 function formatBytes(value: number) {
-  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(1)} GiB`;
-  if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} MiB`;
+  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(1)} gibibytes`;
+  if (value >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} mebibytes`;
   return `${value} bytes`;
 }
 

@@ -1,3 +1,5 @@
+const path = require("node:path");
+
 const ContentSecurityPolicy = `
   frame-ancestors 'self';
 `;
@@ -68,6 +70,10 @@ const optionsForBuild = {
 const nextConfig = {
   transpilePackages: [],
   reactStrictMode: true,
+  // Keep standalone tracing anchored to the pnpm workspace. Without this,
+  // an unrelated ancestor lockfile can change the inferred root and the
+  // generated server path used by the release image.
+  outputFileTracingRoot: path.join(__dirname, ".."),
   ...(process.env.BUILD_TYPE === "export" ? optionsForExport : optionsForBuild),
   experimental: {
     webpackBuildWorker: true,

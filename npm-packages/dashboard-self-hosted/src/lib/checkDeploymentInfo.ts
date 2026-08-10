@@ -8,6 +8,7 @@ async function sleep(ms: number) {
 
 const MAX_RETRIES = 3;
 const MAX_RETRIES_DELAY_MS = 500;
+const REQUEST_TIMEOUT_MS = 5_000;
 
 export type CheckDeploymentResult = {
   allowedOps: string[];
@@ -34,6 +35,7 @@ export async function checkDeploymentInfo(
             Authorization: `Convex ${adminKey}`,
             "Convex-Client": "dashboard-0.0.0",
           },
+          signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         },
       );
       if (resp.ok) {
@@ -41,8 +43,8 @@ export async function checkDeploymentInfo(
           const body = await resp.json();
           if (
             !Array.isArray(body.allowedOps) ||
-            !body.allowedOps.every((operation: unknown) =>
-              typeof operation === "string"
+            !body.allowedOps.every(
+              (operation: unknown) => typeof operation === "string",
             ) ||
             typeof body.isReadOnly !== "boolean" ||
             !(

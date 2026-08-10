@@ -155,7 +155,7 @@ export default function ReleasesPage() {
                   value={shortDigest(status?.release.backendImageDigest)}
                   detail={
                     status?.release.backendImageDigest ??
-                    "Effective digest unknown"
+                    "Effective digest not reported"
                   }
                   warning={!status?.release.backendImageDigest}
                 />
@@ -164,7 +164,7 @@ export default function ReleasesPage() {
                   value={shortDigest(status?.release.dashboardImageDigest)}
                   detail={
                     status?.release.dashboardImageDigest ??
-                    "Effective digest unknown"
+                    "Effective digest not reported"
                   }
                   warning={!status?.release.dashboardImageDigest}
                 />
@@ -342,7 +342,7 @@ function validateRelease(form: ReleaseForm | null) {
 }
 
 function shortDigest(value: string | null | undefined) {
-  return value ? `${value.slice(0, 15)}…${value.slice(-8)}` : "Unknown";
+  return value ? `${value.slice(0, 15)}…${value.slice(-8)}` : "Not reported";
 }
 
 function nullIfEmpty(value: string) {

@@ -15,12 +15,7 @@ import { ToggleTheme } from "@common/elements/ToggleTheme";
 import { SelfHostedDisconnectOverlay } from "@common/features/disconnectOverlay/SelfHostedDisconnectOverlay";
 import { Menu } from "@ui/Menu";
 import { ThemeProvider } from "next-themes";
-import React, {
-  useEffect,
-  useMemo,
-  useState,
-  useContext,
-} from "react";
+import React, { useEffect, useMemo, useState, useContext } from "react";
 import { ErrorBoundary } from "components/ErrorBoundary";
 import { DeploymentDashboardLayout } from "@common/layouts/DeploymentDashboardLayout";
 import {
@@ -39,6 +34,7 @@ import {
   OperatorConfiguration,
   operatorGet,
   operatorMutation,
+  selectFleetOperatorDeployment,
 } from "lib/operatorApi";
 import { Button } from "@ui/Button";
 import {
@@ -46,6 +42,12 @@ import {
   SelfHostedBackendCapabilities,
 } from "lib/backendCapabilities";
 import { SelfHostedSettingsContext } from "lib/selfHostedSettings";
+import { FleetSwitcher } from "components/fleet/FleetSwitcher";
+import {
+  FleetDeployment,
+  fleetBootstrap,
+  issueFleetDashboardCredential,
+} from "lib/fleetApi";
 
 if (process.env.NEXT_PUBLIC_LOAD_MONACO_INTERNALLY === "true") {
   import("../lib/monacoInternalLoader").then((a) => a).catch(console.error);
@@ -71,15 +73,14 @@ function DeploymentDashboardLayoutWrapper({
 
 function App({
   Component,
-  pageProps: {
-    deploymentUrl,
-    ...pageProps
-  },
+  pageProps: { deploymentUrl, ...pageProps },
 }: AppProps & {
   pageProps: {
     deploymentUrl: string | null;
   };
 }) {
+  const isFleetPage = (Component as typeof Component & { fleetPage?: boolean })
+    .fleetPage;
   return (
     <>
       <Head>
@@ -92,22 +93,130 @@ function App({
           <ThemeConsumer />
           <ToastContainer />
           <div className="flex h-screen flex-col">
-            <DeploymentInfoProvider deploymentUrl={deploymentUrl}>
-              <DeploymentApiProvider deploymentOverride="local">
-                <WaitForDeploymentApi>
-                  <DeploymentDashboardLayoutWrapper>
-                    <>
-                      <Component {...pageProps} />
-                      <ConvexCloudReminderToast />
-                    </>
-                  </DeploymentDashboardLayoutWrapper>
-                </WaitForDeploymentApi>
-              </DeploymentApiProvider>
-            </DeploymentInfoProvider>
+            {isFleetPage ? (
+              <Component {...pageProps} />
+            ) : deploymentUrl ? (
+              <DashboardSurface
+                Component={Component}
+                pageProps={pageProps}
+                deploymentUrl={deploymentUrl}
+              />
+            ) : (
+              <SharedFleetDashboard
+                Component={Component}
+                pageProps={pageProps}
+              />
+            )}
           </div>
         </ThemeProvider>
       </UIProvider>
     </>
+  );
+}
+
+function DashboardSurface({
+  Component,
+  pageProps,
+  deploymentUrl,
+  deploymentId,
+}: {
+  Component: AppProps["Component"];
+  pageProps: Record<string, unknown>;
+  deploymentUrl: string;
+  deploymentId?: string;
+}) {
+  return (
+    <DeploymentInfoProvider
+      deploymentUrl={deploymentUrl}
+      deploymentId={deploymentId}
+    >
+      <DeploymentApiProvider deploymentOverride="local">
+        <WaitForDeploymentApi>
+          <DeploymentDashboardLayoutWrapper>
+            <>
+              <Component {...pageProps} />
+              <ConvexCloudReminderToast />
+            </>
+          </DeploymentDashboardLayoutWrapper>
+        </WaitForDeploymentApi>
+      </DeploymentApiProvider>
+    </DeploymentInfoProvider>
+  );
+}
+
+function SharedFleetDashboard({
+  Component,
+  pageProps,
+}: {
+  Component: AppProps["Component"];
+  pageProps: Record<string, unknown>;
+}) {
+  const [deployment, setDeployment] = useState<FleetDeployment | null>(null);
+  const [error, setError] = useState<Error | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const requested =
+      new URLSearchParams(window.location.search).get("deployment") ??
+      window.sessionStorage.getItem("convex-fleet-deployment");
+    if (!requested || !/^dep_[a-f0-9]{32}$/.test(requested)) {
+      window.location.replace("/fleet");
+      return;
+    }
+    void fleetBootstrap()
+      .then((fleet) => {
+        const selected = fleet.deployments.find(
+          (candidate) => candidate.id === requested,
+        );
+        if (
+          !selected ||
+          selected.state !== "ready" ||
+          !selected.deploymentUrl
+        ) {
+          throw new Error("The selected deployment is not ready");
+        }
+        if (!active) return;
+        window.sessionStorage.setItem("convex-fleet-deployment", selected.id);
+        selectFleetOperatorDeployment(selected.id);
+        setDeployment(selected);
+      })
+      .catch((caught) => {
+        if (active) setError(asError(caught));
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  if (error) {
+    return (
+      <div className="flex h-screen items-center justify-center px-6 text-center">
+        <div className="max-w-lg rounded-lg border bg-background-secondary p-5">
+          <div className="font-medium">Deployment access failed</div>
+          <div className="mt-1 text-sm text-content-secondary">
+            {error.message}
+          </div>
+          <Button href="/fleet" className="mt-4" size="sm" variant="neutral">
+            Return to fleet manager
+          </Button>
+        </div>
+      </div>
+    );
+  }
+  if (!deployment?.deploymentUrl) {
+    return (
+      <div className="flex h-screen items-center justify-center text-sm text-content-secondary">
+        Loading the selected deployment…
+      </div>
+    );
+  }
+  return (
+    <DashboardSurface
+      Component={Component}
+      pageProps={pageProps}
+      deploymentUrl={deployment.deploymentUrl}
+      deploymentId={deployment.id}
+    />
   );
 }
 
@@ -281,9 +390,11 @@ const deploymentInfo: Omit<DeploymentInfo, "deploymentUrl" | "adminKey"> = {
 function DeploymentInfoProvider({
   children,
   deploymentUrl,
+  deploymentId,
 }: {
   children: React.ReactNode;
   deploymentUrl: string | null;
+  deploymentId?: string;
 }) {
   const [credential, setCredential] = useState<DashboardCredential | null>(
     null,
@@ -324,10 +435,14 @@ function DeploymentInfoProvider({
     const issue = async () => {
       try {
         const [issued, configurationResponse] = await Promise.all([
-          operatorMutation<DashboardCredential>(
-            "/v1/dashboard-token",
-            "POST",
-          ),
+          deploymentId
+            ? issueFleetDashboardCredential(deploymentId).then(
+                (response) => response.credential,
+              )
+            : operatorMutation<DashboardCredential>(
+                "/v1/dashboard-token",
+                "POST",
+              ),
           operatorGet<{ configuration: OperatorConfiguration }>(
             "/v1/configuration",
           ),
@@ -393,7 +508,7 @@ function DeploymentInfoProvider({
       active = false;
       if (refreshTimer) clearTimeout(refreshTimer);
     };
-  }, [credentialGeneration, deploymentUrl]);
+  }, [credentialGeneration, deploymentId, deploymentUrl]);
 
   const finalValue: DeploymentInfo = useMemo(
     () =>
@@ -405,7 +520,7 @@ function DeploymentInfoProvider({
         useIsOperationAllowed: (operation: string) =>
           credential?.allowedOps.includes(operation) ?? false,
         useIsProtectedDeployment: () => dashboardEditConfirmation,
-      }) as DeploymentInfo,
+      } as DeploymentInfo),
     [credential, dashboardEditConfirmation, deploymentUrl],
   );
   const [mounted, setMounted] = useState(false);
@@ -442,7 +557,7 @@ function DeploymentInfoProvider({
   }
   return (
     <>
-      <Header />
+      <Header deploymentUrl={deploymentUrl ?? ""} />
       <DeploymentInfoContext.Provider value={finalValue}>
         <BackendCapabilitiesContext.Provider value={backendCapabilities}>
           <SelfHostedSettingsContext.Provider value={settingsContextValue}>
@@ -455,14 +570,23 @@ function DeploymentInfoProvider({
   );
 }
 
-function Header() {
+function Header({ deploymentUrl }: { deploymentUrl: string }) {
   if (process.env.NEXT_PUBLIC_HIDE_HEADER) {
     return null;
   }
 
   return (
     <header className="-ml-1 scrollbar-none flex min-h-[56px] items-center justify-between gap-1 overflow-x-auto border-b bg-background-secondary pr-4 sm:gap-6">
-      <ConvexLogo height={64} width={192} />
+      <div className="flex items-center gap-3">
+        <Link
+          href="/fleet"
+          aria-label="Open fleet manager"
+          className="rounded-lg transition-opacity hover:opacity-80"
+        >
+          <ConvexLogo height={64} width={192} />
+        </Link>
+        <FleetSwitcher deploymentUrl={deploymentUrl} />
+      </div>
       <Menu
         buttonProps={{
           icon: (
@@ -491,9 +615,7 @@ function sameOperations(left: string[], right: string[]) {
   const sortedRight = [...right].sort();
   return (
     sortedLeft.length === sortedRight.length &&
-    sortedLeft.every(
-      (operation, index) => operation === sortedRight[index],
-    )
+    sortedLeft.every((operation, index) => operation === sortedRight[index])
   );
 }
 

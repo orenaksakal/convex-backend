@@ -4,6 +4,7 @@ import { Button } from "@ui/Button";
 import { Callout } from "@ui/Callout";
 import {
   OperatorField,
+  OperatorNumberPresetField,
   operatorInputClasses,
 } from "../operator/OperatorPagePrimitives";
 import { useOperatorState } from "../operator/useOperatorState";
@@ -456,20 +457,125 @@ function NumberField({
   value: number;
   onChange: (value: number) => void;
 }) {
+  const presets = insightPresets(label);
+  const max = label === "Warning percent" ? 99 : undefined;
   return (
-    <OperatorField
+    <OperatorNumberPresetField
       label={label}
-      description="Positive whole number; warning percent must be below 100."
-    >
-      <input
-        className={operatorInputClasses}
-        type="number"
-        min={1}
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
-    </OperatorField>
+      description={insightDescription(label)}
+      value={value}
+      presets={presets}
+      min={1}
+      max={max}
+      onChange={(nextValue) => nextValue !== null && onChange(nextValue)}
+      formatValue={label === "Byte read limit" ? formatBytes : undefined}
+    />
   );
+}
+
+function insightPresets(label: string) {
+  if (label === "Requested lookback hours")
+    return [
+      {
+        label: "24 hours",
+        value: 24,
+        description: "Focus on the most recent day.",
+      },
+      {
+        label: "72 hours (recommended)",
+        value: 72,
+        description: "Three days of evidence balances context and scan cost.",
+      },
+      {
+        label: "7 days",
+        value: 168,
+        description: "Useful for weekly workload patterns.",
+      },
+      {
+        label: "30 days",
+        value: 720,
+        description: "Broad historical review with more evidence to scan.",
+      },
+    ];
+  if (label === "Warning percent")
+    return [
+      {
+        label: "70% · early warning",
+        value: 70,
+        description: "More time to react, with more notifications.",
+      },
+      {
+        label: "80% · balanced (recommended)",
+        value: 80,
+        description: "Warns before the hard limit without excessive noise.",
+      },
+      {
+        label: "90% · late warning",
+        value: 90,
+        description: "Fewer warnings and less response time.",
+      },
+      {
+        label: "95% · urgent only",
+        value: 95,
+        description: "Alerts only when execution is very close to the limit.",
+      },
+    ];
+  if (label === "Document read limit")
+    return [
+      {
+        label: "8,000 documents",
+        value: 8_000,
+        description: "Conservative threshold for lightweight queries.",
+      },
+      {
+        label: "16,000 documents",
+        value: 16_000,
+        description: "Tracks the approximate single-function document ceiling.",
+      },
+      {
+        label: "32,000 documents (recommended)",
+        value: 32_000,
+        description:
+          "Matches the patched operator profile's aggregate evidence threshold.",
+      },
+      {
+        label: "64,000 documents",
+        value: 64_000,
+        description: "For higher-volume aggregate analysis.",
+      },
+    ];
+  return [
+    {
+      label: "8 MiB",
+      value: 8 * 1024 ** 2,
+      description: "Conservative byte-read threshold.",
+    },
+    {
+      label: "16 MiB (recommended)",
+      value: 16 * 1024 ** 2,
+      description: "Matches the patched operator profile.",
+    },
+    {
+      label: "32 MiB",
+      value: 32 * 1024 ** 2,
+      description: "Higher-volume query analysis.",
+    },
+    {
+      label: "64 MiB",
+      value: 64 * 1024 ** 2,
+      description: "Broad threshold for large aggregate reads.",
+    },
+  ];
+}
+
+function insightDescription(label: string) {
+  if (label === "Requested lookback hours")
+    return "How far back the analysis scans for function-pressure evidence.";
+  if (label === "Warning percent")
+    return "Percentage of a configured read limit that produces a near-limit warning.";
+  if (label === "Document read limit")
+    return "Document count used to classify read-pressure evidence.";
+  return "Total bytes read used to classify read-pressure evidence.";
 }
 
 function validateForm(form: InsightsForm | null) {

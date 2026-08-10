@@ -72,6 +72,12 @@ const PAGES = [
   {
     group: "Settings",
     key: "settings",
+    label: "Application operations",
+    href: "/settings/operations",
+  },
+  {
+    group: "Settings",
+    key: "settings",
     label: "Security",
     href: "/settings/security",
   },

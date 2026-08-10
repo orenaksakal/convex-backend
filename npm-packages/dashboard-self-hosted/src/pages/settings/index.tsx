@@ -10,9 +10,11 @@ import {
   OperatorError,
   OperatorField,
   OperatorLoading,
+  OperatorNumberPresetField,
   operatorInputClasses,
 } from "../../components/operator/OperatorPagePrimitives";
 import { useOperatorState } from "../../components/operator/useOperatorState";
+import { EffectiveHealthSummary } from "../../components/operator/EffectiveHealthSummary";
 import { OperatorConfiguration } from "../../lib/operatorApi";
 import { SelfHostedSettingsContext } from "../../lib/selfHostedSettings";
 
@@ -76,8 +78,7 @@ export default function Settings() {
     try {
       const result = await operator.patch({
         security: {
-          dashboardEditConfirmation:
-            safetyForm.dashboardEditConfirmation,
+          dashboardEditConfirmation: safetyForm.dashboardEditConfirmation,
         },
         runtime: {
           knobs: { REDACT_LOGS_TO_CLIENT: safetyForm.redactLogsToClient },
@@ -112,8 +113,9 @@ export default function Settings() {
           <h3 className="font-semibold">Deployment summary</h3>
           <p className="mt-1 max-w-prose text-sm text-content-secondary">
             Deployment-local identity, provider, revision, health, and release
-            evidence. Docker placement, domains, TLS, and host routing remain in
-            deployment manifests and are intentionally not editable here.
+            evidence. Docker placement, domains, Transport Layer Security (TLS),
+            and host routing remain in deployment manifests and are
+            intentionally not editable here.
           </p>
         </header>
 
@@ -147,14 +149,20 @@ export default function Settings() {
               <EvidenceCard
                 label="Configuration"
                 value={`Revision ${configuration.revision}`}
-                detail={`Updated ${formatOperatorDate(configuration.updatedAt)}`}
+                detail={`Updated ${formatOperatorDate(
+                  configuration.updatedAt,
+                )}`}
               />
               <EvidenceCard
-                label="Effective health"
+                label="Instance health"
                 value={status?.health.state ?? "Unavailable"}
                 detail={
                   status
-                    ? `${status.freshness.state} evidence · ${formatOperatorDate(status.generatedAt)}`
+                    ? `${
+                        status.health.state === "healthy"
+                          ? "Serving path is working"
+                          : "Review serving-path health below"
+                      } · ${status.freshness.state} evidence`
                     : "No validated status provider"
                 }
                 warning={
@@ -166,7 +174,9 @@ export default function Settings() {
               <EvidenceCard
                 label="Runtime profile"
                 value={configuration.runtime.profile}
-                detail={`${formatBytes(configuration.runtime.memoryMaxBytes)} memory.max · no CPU quota`}
+                detail={`${formatBytes(
+                  configuration.runtime.memoryMaxBytes,
+                )} memory.max · no CPU quota`}
               />
               <EvidenceCard
                 label="Database"
@@ -200,11 +210,16 @@ export default function Settings() {
                 value={shortDigest(status?.release.backendImageDigest)}
                 detail={
                   status?.release.backendImageDigest ??
-                  "Effective digest unknown"
+                  "Effective digest not reported"
                 }
                 warning={!status?.release.backendImageDigest}
               />
             </section>
+
+            <EffectiveHealthSummary
+              configuration={configuration}
+              status={status}
+            />
 
             <section
               className="rounded-lg border bg-background-secondary p-4"
@@ -268,14 +283,20 @@ export default function Settings() {
                       })
                     }
                   >
-                    <option value="cloudflare-r2">Cloudflare R2</option>
-                    <option value="aws-s3">AWS S3</option>
-                    <option value="s3-compatible">S3-compatible</option>
+                    <option value="cloudflare-r2">
+                      Cloudflare R2 object storage
+                    </option>
+                    <option value="aws-s3">
+                      Amazon Simple Storage Service (S3)
+                    </option>
+                    <option value="s3-compatible">
+                      S3-compatible object storage
+                    </option>
                   </select>
                 </OperatorField>
                 <OperatorField
                   label="Endpoint alias"
-                  description="Reviewed host-side endpoint alias, not an unrestricted browser-supplied URL."
+                  description="Safe name for an object-storage endpoint already configured on the private operator host. The browser stores this alias instead of accepting an unrestricted endpoint URL."
                 >
                   <input
                     className={operatorInputClasses}
@@ -314,7 +335,7 @@ export default function Settings() {
                 <div />
                 <NullableNumberField
                   label="Fixed multipart part size"
-                  description="Bytes per non-final part for strict providers such as R2."
+                  description="Size in bytes of each non-final chunk in a multipart upload. Cloudflare R2 requires fixed-size non-final chunks; larger chunks reduce request count but use more memory per concurrent upload."
                   value={form.objectStorage.fixedMultipartPartSizeBytes}
                   onChange={(fixedMultipartPartSizeBytes) =>
                     setForm({
@@ -355,7 +376,7 @@ export default function Settings() {
                     ? formatBytes(
                         status.providers.objectStorage.maximumObjectSizeBytes,
                       )
-                    : "unknown"}
+                    : "not reported"}
                   .
                 </p>
               )}
@@ -424,8 +445,8 @@ export default function Settings() {
                 Deployment safety preferences
               </h4>
               <p className="mt-1 max-w-prose text-sm text-content-secondary">
-                These are deployment-local controls from the Cloud General
-                page. The dedicated-instance preset enables both protections.
+                These are deployment-local controls from the Cloud General page.
+                The dedicated-instance preset enables both protections.
               </p>
 
               {safetyMessage && (
@@ -433,9 +454,7 @@ export default function Settings() {
               )}
 
               <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                <div
-                  className="flex items-start gap-3 rounded-md border bg-background-primary p-3 text-sm"
-                >
+                <div className="flex items-start gap-3 rounded-md border bg-background-primary p-3 text-sm">
                   <input
                     id="dashboard-edit-confirmation"
                     aria-labelledby="dashboard-edit-confirmation-label"
@@ -466,9 +485,7 @@ export default function Settings() {
                     </span>
                   </span>
                 </div>
-                <div
-                  className="flex items-start gap-3 rounded-md border bg-background-primary p-3 text-sm"
-                >
+                <div className="flex items-start gap-3 rounded-md border bg-background-primary p-3 text-sm">
                   <input
                     id="redact-logs-to-client"
                     aria-labelledby="redact-logs-to-client-label"
@@ -511,7 +528,9 @@ export default function Settings() {
 
               <dl className="mt-4 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
                 <dt className="text-content-secondary">Source</dt>
-                <dd>Operator configuration revision {configuration.revision}</dd>
+                <dd>
+                  Operator configuration revision {configuration.revision}
+                </dd>
                 <dt className="text-content-secondary">
                   Edit confirmation effective
                 </dt>
@@ -524,18 +543,24 @@ export default function Settings() {
                   Client-log redaction effective
                 </dt>
                 <dd>
-                  {status?.runtime.effectiveKnobs?.REDACT_LOGS_TO_CLIENT === true
+                  {status?.runtime.effectiveKnobs?.REDACT_LOGS_TO_CLIENT ===
+                  true
                     ? "Enabled"
-                    : status?.runtime.effectiveKnobs
-                          ?.REDACT_LOGS_TO_CLIENT === false
-                      ? "Disabled"
-                      : "Unknown"}
+                    : status?.runtime.effectiveKnobs?.REDACT_LOGS_TO_CLIENT ===
+                      false
+                    ? "Disabled"
+                    : "Not observed"}
                 </dd>
               </dl>
 
               {safetyRollback && (
                 <div className="mt-4 rounded-md border bg-background-primary p-3 text-sm">
-                  Rollback values: edit confirmation {safetyRollback.dashboardEditConfirmation ? "enabled" : "disabled"}; client-log redaction {safetyRollback.redactLogsToClient ? "enabled" : "disabled"}.
+                  Rollback values: edit confirmation{" "}
+                  {safetyRollback.dashboardEditConfirmation
+                    ? "enabled"
+                    : "disabled"}
+                  ; client-log redaction{" "}
+                  {safetyRollback.redactLogsToClient ? "enabled" : "disabled"}.
                 </div>
               )}
 
@@ -621,22 +646,72 @@ function NullableNumberField({
   value: number | null;
   onChange: (value: number | null) => void;
 }) {
+  const isPartSize = label.includes("part size");
   return (
-    <OperatorField label={label} description={description}>
-      <input
-        className={operatorInputClasses}
-        type="number"
-        min={1}
-        value={value ?? ""}
-        onChange={(event) =>
-          onChange(
-            event.target.value === "" ? null : Number(event.target.value),
-          )
-        }
-      />
-    </OperatorField>
+    <OperatorNumberPresetField
+      label={label}
+      description={description}
+      value={value}
+      presets={isPartSize ? MULTIPART_SIZE_PRESETS : OBJECT_SIZE_PRESETS}
+      min={1}
+      onChange={onChange}
+      customLabel="Custom byte count"
+      formatValue={formatBytes}
+    />
   );
 }
+
+const MULTIPART_SIZE_PRESETS = [
+  {
+    label: "Automatic",
+    value: null,
+    description: "Let the provider adapter use its reviewed default.",
+  },
+  {
+    label: "8 MiB (recommended)",
+    value: 8 * 1024 ** 2,
+    description: "Balanced memory use and request count for Cloudflare R2.",
+  },
+  {
+    label: "16 MiB",
+    value: 16 * 1024 ** 2,
+    description: "Fewer upload requests with twice the per-upload memory.",
+  },
+  {
+    label: "32 MiB",
+    value: 32 * 1024 ** 2,
+    description: "Useful for larger archives when memory headroom is ample.",
+  },
+  {
+    label: "64 MiB",
+    value: 64 * 1024 ** 2,
+    description:
+      "High-throughput option with materially higher concurrent memory use.",
+  },
+];
+
+const OBJECT_SIZE_PRESETS = [
+  {
+    label: "Automatic",
+    value: null,
+    description: "Let the provider adapter enforce its reviewed maximum.",
+  },
+  {
+    label: "10 GiB",
+    value: 10 * 1024 ** 3,
+    description: "Conservative cap for smaller instances and exports.",
+  },
+  {
+    label: "40 GiB",
+    value: 40 * 1024 ** 3,
+    description: "Allows larger snapshots while bounding transfer size.",
+  },
+  {
+    label: "78.125 GiB (recommended)",
+    value: 83_886_080_000,
+    description: "Matches 10,000 fixed 8 MiB multipart chunks.",
+  },
+];
 
 function validateProviders(form: ProvidersForm | null) {
   if (!form) return [];
@@ -682,12 +757,12 @@ function hostLabel(value: string) {
 }
 
 function formatBytes(value: number) {
-  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(1)} GiB`;
-  return `${(value / 1024 ** 2).toFixed(1)} MiB`;
+  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(1)} gibibytes`;
+  return `${(value / 1024 ** 2).toFixed(1)} mebibytes`;
 }
 
 function shortDigest(value: string | null | undefined) {
-  return value ? `${value.slice(0, 15)}…${value.slice(-8)}` : "Unknown";
+  return value ? `${value.slice(0, 15)}…${value.slice(-8)}` : "Not reported";
 }
 
 function nullIfEmpty(value: string) {

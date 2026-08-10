@@ -8,6 +8,7 @@ import {
 } from "@radix-ui/react-icons";
 import {
   BellAlertIcon,
+  CircleStackIcon,
   HandRaisedIcon,
   KeyIcon,
   RocketLaunchIcon,
@@ -27,6 +28,7 @@ export const DEPLOYMENT_SETTINGS_PAGES_AND_NAMES = {
   components: "Components",
   backups: "Backup & Restore",
   runtime: "Runtime",
+  operations: "Application Operations",
   security: "Security",
   releases: "Releases & Recovery",
   alerts: "Alerts",
@@ -51,6 +53,7 @@ export const DEPLOYMENT_SETTINGS_PAGE_ICONS: Record<
   components: PuzzlePieceIcon,
   backups: ArchiveIcon,
   runtime: WrenchScrewdriverIcon,
+  operations: CircleStackIcon,
   security: ShieldCheckIcon,
   releases: RocketLaunchIcon,
   alerts: BellAlertIcon,

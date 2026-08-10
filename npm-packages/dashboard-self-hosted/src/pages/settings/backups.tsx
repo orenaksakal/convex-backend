@@ -4,6 +4,10 @@ import { Button } from "@ui/Button";
 import { Callout } from "@ui/Callout";
 import { OperatorActionConfirmation } from "../../components/operator/OperatorActionConfirmation";
 import {
+  OperatorNumberPresetField,
+  OperatorTextPresetField,
+} from "../../components/operator/OperatorPagePrimitives";
+import {
   ExecutedOperatorAction,
   OperatorApiError,
   OperatorConfiguration,
@@ -144,12 +148,8 @@ export default function BackupsPage() {
         {accepted && (
           <Callout variant="success">
             <div>
-              <div className="font-medium">{accepted.kind} accepted.</div>
-              <div>
-                Action <code>{accepted.actionId}</code> was accepted at{" "}
-                {new Date(accepted.acceptedAt).toLocaleString()}. Refresh status
-                to observe completion.
-              </div>
+              <div className="font-medium">{actionResultTitle(accepted)}</div>
+              <div>{actionResultDetail(accepted)}</div>
             </div>
           </Callout>
         )}
@@ -166,9 +166,9 @@ export default function BackupsPage() {
                 Backup policy
               </h4>
               <p className="mt-1 text-sm text-content-secondary">
-                Destination values are aliases to server-side
-                secret/configuration entries; credentials are never returned
-                here.
+                The fleet manager assigns a protected R2 destination to this
+                deployment. The dashboard stores only its safe alias, never
+                Cloudflare credentials or shared bucket details.
               </p>
               <div className="mt-4 grid gap-4 sm:grid-cols-2">
                 <label className="flex items-center gap-2 text-sm sm:col-span-2">
@@ -176,59 +176,71 @@ export default function BackupsPage() {
                     type="checkbox"
                     checked={form.enabled}
                     onChange={(event) =>
-                      setForm({ ...form, enabled: event.target.checked })
+                      setForm({
+                        ...form,
+                        enabled: event.target.checked,
+                        schedule:
+                          event.target.checked && form.schedule === null
+                            ? "0 2 * * *"
+                            : form.schedule,
+                      })
                     }
                   />
                   Schedule automatic backups
                 </label>
-                <Field
+                <OperatorTextPresetField
                   label="Schedule"
-                  description="Five-field cron in UTC, evaluated by the reviewed host scheduler."
-                >
-                  <input
-                    className={inputClasses}
-                    value={form.schedule ?? ""}
-                    onChange={(event) =>
-                      setForm({
-                        ...form,
-                        schedule: nullIfEmpty(event.target.value),
-                      })
-                    }
-                    placeholder="0 2 * * *"
-                  />
-                </Field>
+                  description="Choose a common UTC schedule or enter a five-field cron expression."
+                  value={form.schedule}
+                  presets={BACKUP_SCHEDULE_PRESETS}
+                  onChange={(schedule) => setForm({ ...form, schedule })}
+                  customLabel="Custom cron expression"
+                  placeholder="0 2 * * *"
+                  disabled={!form.enabled}
+                />
                 <Field
-                  label="Destination alias"
-                  description="A non-secret alias configured on the operator host."
+                  label="Backup destination"
+                  description="Assigned automatically. Archives are isolated under this project and deployment's folder in the fleet backup bucket."
                 >
-                  <input
-                    className={inputClasses}
-                    value={form.destinationAlias ?? ""}
-                    onChange={(event) =>
-                      setForm({
-                        ...form,
-                        destinationAlias: nullIfEmpty(event.target.value),
-                      })
-                    }
-                    autoComplete="off"
-                  />
+                  <div className="rounded-md border bg-background-tertiary px-3 py-2 text-sm">
+                    <div className="font-mono font-medium">
+                      {form.destinationAlias ?? "Provisioning incomplete"}
+                    </div>
+                    <div className="mt-1 text-xs text-content-secondary">
+                      Managed by the private fleet host · credentials hidden
+                    </div>
+                  </div>
                 </Field>
-                <NumberField
+                <OperatorNumberPresetField
                   label="Retention days"
+                  description="Number of days successful backup archives are kept before the host scheduler removes them. This is retention, not backup frequency."
                   value={form.retentionDays}
+                  presets={RETENTION_PRESETS}
+                  min={1}
                   onChange={(retentionDays) =>
+                    retentionDays !== null &&
                     setForm({ ...form, retentionDays })
                   }
                 />
-                <NumberField
-                  label="RPO hours"
+                <OperatorNumberPresetField
+                  label="Recovery Point Objective (RPO), hours"
+                  description="Target maximum age of the newest successful backup. For example, 24 hours means the recovery plan accepts up to roughly 24 hours of data changes being absent from the restored backup."
                   value={form.rpoHours}
-                  onChange={(rpoHours) => setForm({ ...form, rpoHours })}
+                  presets={RPO_PRESETS}
+                  min={1}
+                  onChange={(rpoHours) =>
+                    rpoHours !== null && setForm({ ...form, rpoHours })
+                  }
                 />
-                <NumberField
-                  label="RTO hours"
+                <OperatorNumberPresetField
+                  label="Recovery Time Objective (RTO), hours"
+                  description="Target maximum time to restore service from a verified backup. This records and displays the target; it does not guarantee or automate completion within that time."
                   value={form.rtoHours}
-                  onChange={(rtoHours) => setForm({ ...form, rtoHours })}
+                  presets={RTO_PRESETS}
+                  min={1}
+                  onChange={(rtoHours) =>
+                    rtoHours !== null && setForm({ ...form, rtoHours })
+                  }
                 />
               </div>
               {issues.length > 0 && (
@@ -386,6 +398,7 @@ export default function BackupsPage() {
                 onAccepted={(result) => {
                   setPrepared(null);
                   setAccepted(result);
+                  void load();
                 }}
               />
             )}
@@ -393,6 +406,32 @@ export default function BackupsPage() {
         )}
       </div>
     </DeploymentSettingsLayout>
+  );
+}
+
+function actionResultTitle(action: ExecutedOperatorAction) {
+  return action.kind === "manual-backup" && action.result.accepted === true
+    ? "Backup completed and verified."
+    : `${action.kind} completed.`;
+}
+
+function actionResultDetail(action: ExecutedOperatorAction) {
+  if (action.kind === "manual-backup" && action.result.accepted === true) {
+    const archiveId = typeof action.result.archiveId === "string" ? action.result.archiveId : null;
+    const sizeBytes = typeof action.result.sizeBytes === "number" ? action.result.sizeBytes : null;
+    return (
+      <>
+        Action <code>{action.actionId}</code>
+        {archiveId ? <> created archive <code>{archiveId}</code></> : null}
+        {sizeBytes === null ? null : <> ({formatBytes(sizeBytes)})</>}. Backup evidence was refreshed.
+      </>
+    );
+  }
+  return (
+    <>
+      Action <code>{action.actionId}</code> completed at{" "}
+      {new Date(action.acceptedAt).toLocaleString()}.
+    </>
   );
 }
 
@@ -413,8 +452,8 @@ function BackupEvidence({
     last &&
     Date.now() - Date.parse(last.completedAt) <=
       configuration.backup.rpoHours * 3600_000
-      ? "Within RPO"
-      : "Outside or unknown";
+      ? "Within recovery-point target"
+      : "Outside configured retention or not reported";
   const scheduler = status?.backups.scheduler;
   return (
     <section
@@ -433,7 +472,7 @@ function BackupEvidence({
       />
       <Evidence
         label="Last verified backup"
-        value={last?.verified ? last.id : "Unknown"}
+        value={last?.verified ? last.id : "No verified backup"}
         detail={
           last
             ? `${new Date(last.completedAt).toLocaleString()} · ${formatBytes(last.sizeBytes)}`
@@ -444,12 +483,12 @@ function BackupEvidence({
       <Evidence
         label="Recovery point"
         value={rpoState}
-        detail={`Declared RPO ${configuration.backup.rpoHours} hours`}
-        warning={rpoState !== "Within RPO"}
+        detail={`Recovery Point Objective (RPO): ${configuration.backup.rpoHours} hours`}
+        warning={rpoState !== "Within recovery-point target"}
       />
       <Evidence
         label="Restore drill"
-        value={status?.backups.restoreDrill.state ?? "Unknown"}
+        value={status?.backups.restoreDrill.state ?? "Not reported"}
         detail={
           status?.backups.restoreDrill.completedAt
             ? new Date(status.backups.restoreDrill.completedAt).toLocaleString()
@@ -459,15 +498,20 @@ function BackupEvidence({
       />
       <Evidence
         label="Backup scheduler"
-        value={scheduler?.state ?? "Unknown"}
+        value={
+          scheduler?.state === "unknown"
+            ? "Probe unavailable"
+            : (scheduler?.state ?? "Unavailable")
+        }
         detail={
           scheduler?.lastEvaluatedAt
-            ? `Revision ${scheduler.configurationRevision ?? "unknown"} · checked ${new Date(scheduler.lastEvaluatedAt).toLocaleString()}${scheduler.lastError ? ` · ${scheduler.lastError}` : ""}`
+            ? `Revision ${scheduler.configurationRevision ?? "not reported"} · checked ${new Date(scheduler.lastEvaluatedAt).toLocaleString()}${scheduler.lastError ? ` · ${scheduler.lastError}` : ""}`
             : "No scheduler evidence"
         }
         warning={
           configuration.backup.enabled
-            ? !scheduler || ["unknown", "failed", "disabled"].includes(scheduler.state)
+            ? !scheduler ||
+              ["unknown", "failed", "disabled"].includes(scheduler.state)
             : scheduler?.state !== "disabled"
         }
       />
@@ -523,28 +567,6 @@ function Field({
   );
 }
 
-function NumberField({
-  label,
-  value,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  onChange: (value: number) => void;
-}) {
-  return (
-    <Field label={label} description="Positive whole number.">
-      <input
-        className={inputClasses}
-        type="number"
-        min={1}
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-      />
-    </Field>
-  );
-}
-
 function Panel({ title, detail }: { title: string; detail: string }) {
   return (
     <div className="rounded-lg border bg-background-secondary p-4">
@@ -553,6 +575,102 @@ function Panel({ title, detail }: { title: string; detail: string }) {
     </div>
   );
 }
+
+const BACKUP_SCHEDULE_PRESETS = [
+  {
+    label: "Hourly · on the hour",
+    value: "0 * * * *",
+    description: "Runs at minute 0 of every hour in UTC. Best for a low RPO.",
+  },
+  {
+    label: "Every 6 hours",
+    value: "0 */6 * * *",
+    description:
+      "Runs four times per day at 00:00, 06:00, 12:00, and 18:00 UTC.",
+  },
+  {
+    label: "Daily · 02:00 UTC (recommended)",
+    value: "0 2 * * *",
+    description: "A balanced default that runs once per day at 02:00 UTC.",
+  },
+  {
+    label: "Weekly · Sunday 02:00 UTC",
+    value: "0 2 * * 0",
+    description:
+      "Runs once a week. Suitable only when a seven-day recovery point is acceptable.",
+  },
+];
+
+const RETENTION_PRESETS = [
+  {
+    label: "7 days",
+    value: 7,
+    description: "One week of recovery points with the lowest storage use.",
+  },
+  {
+    label: "30 days (recommended)",
+    value: 30,
+    description: "A practical month-long recovery window.",
+  },
+  {
+    label: "90 days",
+    value: 90,
+    description: "A quarter of recovery history for slower incident discovery.",
+  },
+  {
+    label: "365 days",
+    value: 365,
+    description:
+      "One year of archives; confirm storage cost and lifecycle policy.",
+  },
+];
+
+const RPO_PRESETS = [
+  {
+    label: "1 hour",
+    value: 1,
+    description: "Target no more than one hour of potential data loss.",
+  },
+  {
+    label: "6 hours",
+    value: 6,
+    description: "Target no more than six hours of potential data loss.",
+  },
+  {
+    label: "12 hours",
+    value: 12,
+    description: "Target no more than half a day of potential data loss.",
+  },
+  {
+    label: "24 hours (recommended for daily backups)",
+    value: 24,
+    description: "Matches the recommended daily schedule.",
+  },
+];
+
+const RTO_PRESETS = [
+  {
+    label: "1 hour",
+    value: 1,
+    description: "Aggressive restore target requiring practiced automation.",
+  },
+  {
+    label: "2 hours",
+    value: 2,
+    description: "Fast recovery target with regular restore drills.",
+  },
+  {
+    label: "4 hours (recommended)",
+    value: 4,
+    description: "Balanced operational target for a dedicated instance.",
+  },
+  { label: "8 hours", value: 8, description: "Business-day recovery target." },
+  {
+    label: "24 hours",
+    value: 24,
+    description: "Next-day recovery target for lower-priority environments.",
+  },
+];
 
 function ErrorCallout({
   error,
@@ -595,17 +713,15 @@ function validateForm(form: BackupForm | null) {
       (value) => Number.isSafeInteger(value) && value > 0,
     )
   )
-    issues.push("Retention, RPO, and RTO must be positive whole numbers.");
+    issues.push(
+      "Retention, Recovery Point Objective (RPO), and Recovery Time Objective (RTO) must be positive whole numbers.",
+    );
   return issues;
 }
 
-function nullIfEmpty(value: string) {
-  return value.trim() === "" ? null : value;
-}
-
 function formatBytes(value: number) {
-  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(1)} GiB`;
-  return `${(value / 1024 ** 2).toFixed(1)} MiB`;
+  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(1)} gibibytes`;
+  return `${(value / 1024 ** 2).toFixed(1)} mebibytes`;
 }
 
 function asError(value: unknown) {

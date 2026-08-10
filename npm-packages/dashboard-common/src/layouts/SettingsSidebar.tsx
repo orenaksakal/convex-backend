@@ -180,6 +180,7 @@ function useAllowedPages() {
       (page) =>
         page !== "snapshots" &&
         page !== "runtime" &&
+        page !== "operations" &&
         page !== "security" &&
         page !== "releases" &&
         page !== "alerts",

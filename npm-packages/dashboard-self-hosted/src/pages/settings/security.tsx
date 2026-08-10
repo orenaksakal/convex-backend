@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { DeploymentSettingsLayout } from "@common/layouts/DeploymentSettingsLayout";
+import { useDeploymentUrl } from "@common/lib/deploymentApi";
 import { Button } from "@ui/Button";
 import { Callout } from "@ui/Callout";
 import { OperatorActionConfirmation } from "../../components/operator/OperatorActionConfirmation";
@@ -9,6 +10,7 @@ import {
   OperatorError,
   OperatorField,
   OperatorLoading,
+  OperatorNumberPresetField,
   operatorInputClasses,
 } from "../../components/operator/OperatorPagePrimitives";
 import { useOperatorState } from "../../components/operator/useOperatorState";
@@ -32,7 +34,59 @@ type DeployConfirmation = {
   value: string;
 };
 
+const DEPLOY_EXPIRY_PRESETS = [
+  {
+    label: "7 days · temporary",
+    value: 7,
+    description: "Best for a short-lived machine or migration.",
+  },
+  {
+    label: "30 days · frequent rotation",
+    value: 30,
+    description: "Limits exposure with a monthly rotation routine.",
+  },
+  {
+    label: "90 days (recommended)",
+    value: 90,
+    description: "Balanced lifetime for continuous integration credentials.",
+  },
+  {
+    label: "180 days",
+    value: 180,
+    description: "Lower-maintenance option for stable automation.",
+  },
+  {
+    label: "365 days · maximum",
+    value: 365,
+    description: "Longest allowed lifetime; schedule a rotation reminder.",
+  },
+];
+
+const SESSION_TTL_PRESETS = [
+  {
+    label: "5 minutes · strict",
+    value: 300,
+    description: "Frequent reauthentication for high-risk maintenance windows.",
+  },
+  {
+    label: "15 minutes (recommended)",
+    value: 900,
+    description: "Short-lived access without interrupting routine checks.",
+  },
+  {
+    label: "30 minutes",
+    value: 1800,
+    description: "More convenient for longer operational sessions.",
+  },
+  {
+    label: "1 hour · maximum",
+    value: 3600,
+    description: "Longest permitted dashboard session.",
+  },
+];
+
 export default function SecurityPage() {
+  const deploymentUrl = useDeploymentUrl();
   const operator = useOperatorState();
   const [form, setForm] = useState<SecurityForm | null>(null);
   const [reviewing, setReviewing] = useState(false);
@@ -50,6 +104,9 @@ export default function SecurityPage() {
   const [deployBusy, setDeployBusy] = useState(false);
   const [issuedDeployCredential, setIssuedDeployCredential] =
     useState<IssuedDeployCredential | null>(null);
+  const deployCommand = issuedDeployCredential
+    ? `npx convex deploy --url ${JSON.stringify(deploymentUrl)} --admin-key ${JSON.stringify(issuedDeployCredential.token)}`
+    : null;
   const [deployConfirmation, setDeployConfirmation] =
     useState<DeployConfirmation | null>(null);
 
@@ -115,8 +172,7 @@ export default function SecurityPage() {
       setForm({
         dashboardSessionTtlSeconds:
           result.current.security.dashboardSessionTtlSeconds,
-        dashboardCredentialRef:
-          result.current.security.dashboardCredentialRef,
+        dashboardCredentialRef: result.current.security.dashboardCredentialRef,
       });
       setReviewing(false);
       setMessage("Security policy saved.");
@@ -254,10 +310,30 @@ export default function SecurityPage() {
         {
           label: "Object storage",
           alias: operator.configuration?.providers.objectStorage.credentialRef,
-          detail: "S3/R2 credential selected on General",
+          detail:
+            "Amazon S3-compatible or Cloudflare R2 object-storage credential selected on General",
         },
       ]
     : [];
+  const credentialRotationEnabled =
+    operator.metadata?.capabilities.actions["rotate-credential"]?.enabled ===
+    true;
+  const visibleCredentialReferences = credentialReferences.filter(
+    (reference) => {
+      const credential = reference.alias
+        ? status?.security.credentials.find(
+            (item) => item.alias === reference.alias,
+          )
+        : undefined;
+      return (
+        credentialRotationEnabled ||
+        (credential !== undefined &&
+          (credential.state !== "unknown" ||
+            credential.lastRotatedAt !== null ||
+            credential.rotationDueAt !== null))
+      );
+    },
+  );
 
   return (
     <DeploymentSettingsLayout page="security">
@@ -267,8 +343,9 @@ export default function SecurityPage() {
           <p className="mt-1 max-w-prose text-sm text-content-secondary">
             Verify the private administration boundary and configure scoped
             dashboard sessions. Client-log exposure and edit confirmation are
-            configured on General. Host firewall, proxy, TLS, and domain
-            configuration remain deployment-layer controls.
+            configured on General. Host firewall, proxy, Transport Layer
+            Security (TLS), and domain configuration remain deployment-layer
+            controls.
           </p>
         </header>
 
@@ -291,8 +368,8 @@ export default function SecurityPage() {
         {accepted && (
           <Callout variant="success">
             Credential rotation action <code>{accepted.actionId}</code> was
-            accepted. Refresh status after the host hook completes to verify
-            the new rotation timestamp.
+            accepted. Refresh status after the host hook completes to verify the
+            new rotation timestamp.
           </Callout>
         )}
         {prepared && (
@@ -341,14 +418,15 @@ export default function SecurityPage() {
                     ? "Effective"
                     : effectiveRedaction === false
                       ? "Disabled"
-                      : "Unknown"
+                      : "Not observed"
                 }
                 detail={`Declared ${operator.configuration.runtime.knobs.REDACT_LOGS_TO_CLIENT === true ? "enabled" : "disabled"} on General`}
                 warning={
                   !evidenceIsCurrent ||
                   effectiveRedaction !==
                     (operator.configuration.runtime.knobs
-                      .REDACT_LOGS_TO_CLIENT === true)
+                      .REDACT_LOGS_TO_CLIENT ===
+                      true)
                 }
               />
               <EvidenceCard
@@ -369,14 +447,24 @@ export default function SecurityPage() {
                 aria-labelledby="deploy-credentials-title"
               >
                 <h4 id="deploy-credentials-title" className="font-semibold">
-                  CLI and CI deploy credentials
+                  Command-line and automation deploy credentials
                 </h4>
                 <p className="mt-1 max-w-prose text-sm text-content-secondary">
-                  Create credentials restricted by the backend to the single
+                  Create credentials for the command-line interface (CLI) or a
+                  continuous-integration (CI) workflow, restricted by the
+                  backend to the single
                   <code className="mx-1">Deploy</code> operation. Revocation is
                   checked on every use. Secret values are shown once and are
                   never stored by the operator or browser.
                 </p>
+                <Callout variant="instructions" className="mt-3">
+                  These self-hosted credentials are not Convex Cloud deploy
+                  keys. Do not put one in <code>CONVEX_DEPLOY_KEY</code>. Pass
+                  both the deployment URL and credential using the exact
+                  command shown after creation, or configure
+                  <code className="mx-1">CONVEX_SELF_HOSTED_URL</code> and
+                  <code>CONVEX_SELF_HOSTED_ADMIN_KEY</code> together.
+                </Callout>
 
                 <div className="mt-4 grid gap-4 sm:grid-cols-[minmax(0,1fr)_10rem_auto] sm:items-end">
                   <OperatorField
@@ -391,21 +479,17 @@ export default function SecurityPage() {
                       onChange={(event) => setDeployLabel(event.target.value)}
                     />
                   </OperatorField>
-                  <OperatorField
+                  <OperatorNumberPresetField
                     label="Expires in days"
-                    description="1 through 365 days."
-                  >
-                    <input
-                      className={operatorInputClasses}
-                      type="number"
-                      min={1}
-                      max={365}
-                      value={deployExpiryDays}
-                      onChange={(event) =>
-                        setDeployExpiryDays(Number(event.target.value))
-                      }
-                    />
-                  </OperatorField>
+                    description="Shorter credentials limit exposure; choose a common rotation interval or set an exact duration."
+                    value={deployExpiryDays}
+                    presets={DEPLOY_EXPIRY_PRESETS}
+                    min={1}
+                    max={365}
+                    onChange={(value) =>
+                      value !== null && setDeployExpiryDays(value)
+                    }
+                  />
                   <Button
                     disabled={
                       !deployCredentialCapability.write ||
@@ -432,6 +516,13 @@ export default function SecurityPage() {
                       <code className="rounded-sm bg-background-tertiary p-3 text-xs break-all">
                         {issuedDeployCredential.token}
                       </code>
+                      <div className="text-sm text-content-secondary">
+                        Run from the application directory containing your
+                        <code className="mx-1">convex/</code> functions:
+                      </div>
+                      <code className="rounded-sm bg-background-tertiary p-3 text-xs break-all">
+                        {deployCommand}
+                      </code>
                       <div className="flex flex-wrap gap-2">
                         <Button
                           size="xs"
@@ -439,12 +530,34 @@ export default function SecurityPage() {
                             void navigator.clipboard
                               .writeText(issuedDeployCredential.token)
                               .then(() =>
-                                setMessage("Deploy credential copied to the clipboard."),
+                                setMessage(
+                                  "Deploy credential copied to the clipboard.",
+                                ),
                               )
-                              .catch((error) => setSessionError(asError(error)));
+                              .catch((error) =>
+                                setSessionError(asError(error)),
+                              );
                           }}
                         >
                           Copy secret
+                        </Button>
+                        <Button
+                          size="xs"
+                          onClick={() => {
+                            if (!deployCommand) return;
+                            void navigator.clipboard
+                              .writeText(deployCommand)
+                              .then(() =>
+                                setMessage(
+                                  "Deploy command copied to the clipboard.",
+                                ),
+                              )
+                              .catch((error) =>
+                                setSessionError(asError(error)),
+                              );
+                          }}
+                        >
+                          Copy deploy command
                         </Button>
                         <Button
                           size="xs"
@@ -464,7 +577,10 @@ export default function SecurityPage() {
                     role="alertdialog"
                     aria-labelledby="deploy-confirmation-title"
                   >
-                    <div id="deploy-confirmation-title" className="font-semibold">
+                    <div
+                      id="deploy-confirmation-title"
+                      className="font-semibold"
+                    >
                       Confirm {deployConfirmation.kind}
                     </div>
                     <p className="mt-1 text-content-secondary">
@@ -475,7 +591,8 @@ export default function SecurityPage() {
                     </p>
                     <label className="mt-3 flex max-w-xl flex-col gap-1">
                       <span>
-                        Type <code>{`${deployConfirmation.kind} ${deployConfirmation.credential.id}`}</code>
+                        Type{" "}
+                        <code>{`${deployConfirmation.kind} ${deployConfirmation.credential.id}`}</code>
                       </span>
                       <input
                         className={operatorInputClasses}
@@ -528,9 +645,14 @@ export default function SecurityPage() {
                     </thead>
                     <tbody>
                       {deployCredentials?.map((credential) => (
-                        <tr key={credential.id} className="border-b last:border-0">
+                        <tr
+                          key={credential.id}
+                          className="border-b last:border-0"
+                        >
                           <td className="p-3">
-                            <div className="font-medium">{credential.label}</div>
+                            <div className="font-medium">
+                              {credential.label}
+                            </div>
                             <code className="text-xs text-content-secondary">
                               {credential.id}
                             </code>
@@ -589,15 +711,21 @@ export default function SecurityPage() {
                       ))}
                       {deployCredentials?.length === 0 && (
                         <tr>
-                          <td colSpan={6} className="p-4 text-content-secondary">
-                            No deploy credentials. Create one for a trusted CLI
-                            or CI workflow.
+                          <td
+                            colSpan={6}
+                            className="p-4 text-content-secondary"
+                          >
+                            No deploy credentials. Create one for a trusted
+                            command-line or continuous-integration workflow.
                           </td>
                         </tr>
                       )}
                       {deployCredentials === null && (
                         <tr>
-                          <td colSpan={6} className="p-4 text-content-secondary">
+                          <td
+                            colSpan={6}
+                            className="p-4 text-content-secondary"
+                          >
                             Loading deploy credentials…
                           </td>
                         </tr>
@@ -608,85 +736,89 @@ export default function SecurityPage() {
               </section>
             )}
 
-            <section
-              className="rounded-lg border bg-background-secondary p-4"
-              aria-labelledby="credential-lifecycle-title"
-            >
-              <h4 id="credential-lifecycle-title" className="font-semibold">
-                Credential lifecycle
-              </h4>
-              <p className="mt-1 max-w-prose text-sm text-content-secondary">
-                Rotate only configured aliases through host-reviewed provider
-                adapters. Existing secret values are never returned to this
-                page.
-              </p>
-              <div className="mt-4 grid gap-3 lg:grid-cols-3">
-                {credentialReferences.map((reference) => {
-                  const credential = reference.alias
-                    ? status?.security.credentials.find(
-                        (item) => item.alias === reference.alias,
-                      )
-                    : undefined;
-                  return (
-                    <div
-                      key={reference.label}
-                      className="rounded-md border bg-background-primary p-3"
-                    >
-                      <div className="text-sm font-medium">
-                        {reference.label}
-                      </div>
-                      <div className="mt-1 text-xs text-content-secondary">
-                        {reference.detail}
-                      </div>
-                      <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
-                        <dt className="text-content-secondary">Alias</dt>
-                        <dd className="truncate font-mono text-xs">
-                          {reference.alias ?? "Not configured"}
-                        </dd>
-                        <dt className="text-content-secondary">State</dt>
-                        <dd>{credential?.state ?? "Unknown"}</dd>
-                        <dt className="text-content-secondary">Last rotated</dt>
-                        <dd>
-                          {credential?.lastRotatedAt
-                            ? formatOperatorDate(credential.lastRotatedAt)
-                            : "Unknown"}
-                        </dd>
-                        <dt className="text-content-secondary">Due</dt>
-                        <dd>
-                          {credential?.rotationDueAt
-                            ? formatOperatorDate(credential.rotationDueAt)
-                            : "Unknown"}
-                        </dd>
-                      </dl>
-                      <Button
-                        className="mt-3"
-                        variant="neutral"
-                        disabled={
-                          changed ||
-                          !reference.alias ||
-                          !operator.metadata?.capabilities.actions[
-                            "rotate-credential"
-                          ]?.enabled
-                        }
-                        onClick={() => {
-                          if (reference.alias)
-                            void prepareRotation(reference.alias);
-                        }}
+            {visibleCredentialReferences.length > 0 && (
+              <section
+                className="rounded-lg border bg-background-secondary p-4"
+                aria-labelledby="credential-lifecycle-title"
+              >
+                <h4 id="credential-lifecycle-title" className="font-semibold">
+                  Credential lifecycle
+                </h4>
+                <p className="mt-1 max-w-prose text-sm text-content-secondary">
+                  Rotate only configured aliases through host-reviewed provider
+                  adapters. Existing secret values are never returned to this
+                  page.
+                </p>
+                <div className="mt-4 grid gap-3 lg:grid-cols-3">
+                  {visibleCredentialReferences.map((reference) => {
+                    const credential = reference.alias
+                      ? status?.security.credentials.find(
+                          (item) => item.alias === reference.alias,
+                        )
+                      : undefined;
+                    return (
+                      <div
+                        key={reference.label}
+                        className="rounded-md border bg-background-primary p-3"
                       >
-                        Rotate {reference.label.toLowerCase()} credential
-                      </Button>
-                    </div>
-                  );
-                })}
-              </div>
-              {!evidenceIsCurrent && (
-                <Callout variant="error">
-                  Credential lifecycle evidence is missing or stale. Rotation
-                  controls may prepare an action, but no credential is current
-                  until the host provider attests it.
-                </Callout>
-              )}
-            </section>
+                        <div className="text-sm font-medium">
+                          {reference.label}
+                        </div>
+                        <div className="mt-1 text-xs text-content-secondary">
+                          {reference.detail}
+                        </div>
+                        <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
+                          <dt className="text-content-secondary">Alias</dt>
+                          <dd className="truncate font-mono text-xs">
+                            {reference.alias ?? "Not configured"}
+                          </dd>
+                          <dt className="text-content-secondary">State</dt>
+                          <dd>{credential?.state ?? "Not inventoried"}</dd>
+                          <dt className="text-content-secondary">
+                            Last rotated
+                          </dt>
+                          <dd>
+                            {credential?.lastRotatedAt
+                              ? formatOperatorDate(credential.lastRotatedAt)
+                              : "No rotation record"}
+                          </dd>
+                          <dt className="text-content-secondary">Due</dt>
+                          <dd>
+                            {credential?.rotationDueAt
+                              ? formatOperatorDate(credential.rotationDueAt)
+                              : "Review required"}
+                          </dd>
+                        </dl>
+                        <Button
+                          className="mt-3"
+                          variant="neutral"
+                          disabled={
+                            changed ||
+                            !reference.alias ||
+                            !operator.metadata?.capabilities.actions[
+                              "rotate-credential"
+                            ]?.enabled
+                          }
+                          onClick={() => {
+                            if (reference.alias)
+                              void prepareRotation(reference.alias);
+                          }}
+                        >
+                          Rotate {reference.label.toLowerCase()} credential
+                        </Button>
+                      </div>
+                    );
+                  })}
+                </div>
+                {!evidenceIsCurrent && (
+                  <Callout variant="error">
+                    Credential lifecycle evidence is missing or stale. Rotation
+                    controls may prepare an action, but no credential is current
+                    until the host provider attests it.
+                  </Callout>
+                )}
+              </section>
+            )}
 
             <section
               className="rounded-lg border bg-background-secondary p-4"
@@ -696,27 +828,21 @@ export default function SecurityPage() {
                 Dashboard security policy
               </h4>
               <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                <OperatorField
-                  label="Session TTL seconds"
-                  description="Scoped HttpOnly dashboard session; minimum 60 and maximum 3600 seconds."
-                >
-                  <input
-                    className={operatorInputClasses}
-                    type="number"
-                    min={60}
-                    max={3600}
-                    value={form.dashboardSessionTtlSeconds}
-                    onChange={(event) =>
-                      setForm({
-                        ...form,
-                        dashboardSessionTtlSeconds: Number(event.target.value),
-                      })
-                    }
-                  />
-                </OperatorField>
+                <OperatorNumberPresetField
+                  label="Dashboard session time to live (TTL), seconds"
+                  description="How long a signed-in dashboard session remains valid before reauthentication is required. The cookie is scoped and inaccessible to browser JavaScript (HttpOnly); minimum 60 and maximum 3600 seconds."
+                  value={form.dashboardSessionTtlSeconds}
+                  presets={SESSION_TTL_PRESETS}
+                  min={60}
+                  max={3600}
+                  onChange={(dashboardSessionTtlSeconds) =>
+                    dashboardSessionTtlSeconds !== null &&
+                    setForm({ ...form, dashboardSessionTtlSeconds })
+                  }
+                />
                 <OperatorField
                   label="Dashboard credential alias"
-                  description="Server-side secret-manager reference; the secret value is never returned."
+                  description="Safe name that points to the dashboard-signing secret on the private operator host. The alias is shown here; the secret value is never returned to the browser."
                 >
                   <input
                     className={operatorInputClasses}
@@ -836,5 +962,5 @@ function asError(value: unknown) {
 function probeLabel(value: boolean | null | undefined) {
   if (value === false) return "Private";
   if (value === true) return "Publicly reachable";
-  return "Unknown";
+  return "Not externally verified";
 }

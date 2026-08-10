@@ -5,6 +5,7 @@ export type KnobDefinition = {
   min?: number;
   max?: number;
   restartRequired: boolean;
+  description: string;
 };
 
 export type OperatorConfiguration = {
@@ -44,10 +45,18 @@ export type OperatorConfiguration = {
   alerts: {
     enabled: boolean;
     destinationAlias: string | null;
-    hostMemoryWarningPercent: number;
-    hostMemoryCriticalPercent: number;
-    hostCpuWarningPercent: number;
-    hostCpuCriticalPercent: number;
+    lookbackMinutes: number;
+    functionFailureWarningCount: number;
+    functionFailureCriticalCount: number;
+    permanentOccWarningCount: number;
+    permanentOccCriticalCount: number;
+    resourceLimitWarningCount: number;
+    resourceLimitCriticalCount: number;
+    containerRestartWarningCount: number;
+    containerRestartCriticalCount: number;
+    alertOnContainerUnhealthy: boolean;
+    alertOnProviderUnavailable: boolean;
+    alertOnBackupFailure: boolean;
   };
   insights: {
     lookbackHours: number;
@@ -107,7 +116,13 @@ export type OperatorStatus = {
       completedAt: string | null;
     };
     scheduler?: {
-      state: "disabled" | "idle" | "running" | "succeeded" | "failed" | "unknown";
+      state:
+        | "disabled"
+        | "idle"
+        | "running"
+        | "succeeded"
+        | "failed"
+        | "unknown";
       configurationRevision: number | null;
       lastEvaluatedAt: string | null;
       scheduledFor: string | null;
@@ -143,8 +158,29 @@ export type OperatorStatus = {
     lastDeliveryAt: string | null;
     checkedAt?: string;
     level?: "warning" | "critical" | "test" | null;
-    hostCpuPercent?: number | null;
-    hostMemoryPercent?: number | null;
+    reasons?: string[];
+    metrics?: {
+      lookbackMinutes: number;
+      container: {
+        running: boolean;
+        status: string;
+        health: string;
+        oomKilled: boolean;
+        restartCount: number;
+      };
+      convex: {
+        completionCount: number;
+        functionFailures: number;
+        permanentOccFailures: number;
+        resourceLimitFailures: number;
+      };
+      providers: { database: string; objectStorage: string };
+      backup: {
+        schedulerState: string;
+        failed: boolean;
+        lastSuccessfulAt: string | null;
+      };
+    } | null;
     lastError?: string | null;
   };
 };
@@ -168,8 +204,62 @@ export type OperatorMetadata = {
     insightsHistory: { read: boolean };
     dashboardToken: { issue: boolean };
     deployCredentials: { read: boolean; write: boolean };
+    alertDestinations: { read: boolean; write: boolean };
+    applicationOperations: {
+      read: boolean;
+      postgresMaintenance: boolean;
+      authBridge: boolean;
+    };
     actions: Record<string, { enabled: boolean }>;
   };
+};
+
+export type ApplicationOperations = {
+  schemaVersion: 1;
+  generatedAt: string;
+  database: {
+    name: string;
+    sizeBytes: number;
+    connections: { active: number; total: number; max: number };
+    transactions: { committed: number; rolledBack: number };
+    cacheHitRatio: number;
+    deadlocks: number;
+    tempBytes: number;
+    statsResetAt: string | null;
+  };
+  tables: Array<{
+    schema: string;
+    name: string;
+    estimatedRows: number;
+    sizeBytes: number;
+    analyzedAt: string | null;
+  }>;
+  authBridge: {
+    installed: boolean;
+    pending: number;
+    retrying: number;
+    deadLettered: number;
+    delivered: number;
+    oldestPendingAt: string | null;
+  };
+};
+
+export type AlertDestinations = {
+  schemaVersion: 1;
+  instanceId: string;
+  configured: boolean;
+  updatedAt?: string;
+  email: {
+    enabled: boolean;
+    host?: string;
+    port?: number;
+    secure?: boolean;
+    username?: string;
+    from?: string;
+    to?: string;
+    passwordConfigured: boolean;
+  };
+  telegram: { enabled: boolean; shoutrrUrlConfigured: boolean };
 };
 
 export type DeployCredential = {
@@ -256,6 +346,15 @@ export class OperatorApiError extends Error {
 }
 
 let sessionRequest: Promise<void> | null = null;
+let fleetDeploymentId: string | null = null;
+
+export function selectFleetOperatorDeployment(deploymentId: string | null) {
+  if (deploymentId !== null && !/^dep_[a-f0-9]{32}$/.test(deploymentId)) {
+    throw new Error("Fleet deployment ID is invalid");
+  }
+  fleetDeploymentId = deploymentId;
+  sessionRequest = null;
+}
 
 export async function operatorGet<T>(path: string): Promise<T> {
   return operatorRequest<T>(path, { method: "GET" });
@@ -263,7 +362,7 @@ export async function operatorGet<T>(path: string): Promise<T> {
 
 export async function operatorMutation<T>(
   path: string,
-  method: "POST" | "PATCH" | "DELETE",
+  method: "POST" | "PUT" | "PATCH" | "DELETE",
   body?: unknown,
 ): Promise<T> {
   return operatorRequest<T>(path, {
@@ -282,7 +381,12 @@ async function operatorRequest<T>(
   const response = await fetch(operatorUrl(path), {
     ...init,
     credentials: "same-origin",
-    headers: { ...init.headers, "X-Convex-Operator": "1" },
+    headers: {
+      ...init.headers,
+      ...(fleetDeploymentId
+        ? { "X-Convex-Fleet": "1" }
+        : { "X-Convex-Operator": "1" }),
+    },
   });
   if (response.status === 401 && mayRefreshSession) {
     await ensureOperatorSession();
@@ -297,6 +401,7 @@ async function operatorRequest<T>(
 }
 
 async function ensureOperatorSession() {
+  if (fleetDeploymentId) return;
   if (!sessionRequest) {
     sessionRequest = (async () => {
       const response = await fetch(operatorUrl("/v1/browser-sessions"), {
@@ -316,6 +421,11 @@ async function ensureOperatorSession() {
 }
 
 function operatorUrl(path: string) {
+  if (fleetDeploymentId) {
+    return `${fleetBase()}/v1/deployments/${encodeURIComponent(
+      fleetDeploymentId,
+    )}/operator${path}`;
+  }
   const base = process.env.NEXT_PUBLIC_OPERATOR_API_PATH ?? "/operator";
   if (!base.startsWith("/") || base.startsWith("//") || base.includes("://")) {
     throw new Error(
@@ -325,4 +435,14 @@ function operatorUrl(path: string) {
   if (!path.startsWith("/"))
     throw new Error("operator API path must start with /");
   return `${base.replace(/\/$/, "")}${path}`;
+}
+
+function fleetBase() {
+  const base = process.env.NEXT_PUBLIC_FLEET_API_PATH ?? "/fleet";
+  if (!base.startsWith("/") || base.startsWith("//") || base.includes("://")) {
+    throw new Error(
+      "NEXT_PUBLIC_FLEET_API_PATH must be a same-origin absolute path",
+    );
+  }
+  return base.replace(/\/$/, "");
 }

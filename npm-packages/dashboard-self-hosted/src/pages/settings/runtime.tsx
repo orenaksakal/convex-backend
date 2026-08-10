@@ -5,6 +5,11 @@ import { DeploymentSettingsLayout } from "@common/layouts/DeploymentSettingsLayo
 import { DeploymentInfoContext } from "@common/lib/deploymentContext";
 import { OperatorActionConfirmation } from "../../components/operator/OperatorActionConfirmation";
 import {
+  HealthSignal,
+  SignalLevel,
+  TrafficLightLegend,
+} from "../../components/operator/HealthSignal";
+import {
   ExecutedOperatorAction,
   KnobDefinition,
   OperatorApiError,
@@ -260,6 +265,9 @@ export default function RuntimeSettingsPage() {
                             effective={
                               data.status?.runtime.effectiveKnobs?.[name]
                             }
+                            recommended={
+                              data.metadata.profileDefaults.knobs[name]
+                            }
                             proposed={proposed[name]}
                             source={
                               data.configuration.runtime.knobs[name] ===
@@ -428,7 +436,7 @@ function RuntimeSummary({ data }: { data: RuntimeData }) {
         value={state}
         detail={
           status
-            ? `Observed ${formatDate(status.runtime.observedAt)} · revision ${effectiveRevision ?? "unknown"}`
+            ? `Observed ${formatDate(status.runtime.observedAt)} · revision ${effectiveRevision ?? "not reported"}`
             : "No validated status provider"
         }
         warning={state !== "Effective"}
@@ -472,6 +480,7 @@ function KnobRow({
   definition,
   current,
   effective,
+  recommended,
   proposed,
   source,
   onChange,
@@ -480,6 +489,7 @@ function KnobRow({
   definition: KnobDefinition;
   current: string | number | boolean;
   effective: string | number | boolean | null | undefined;
+  recommended: string | number | boolean;
   proposed: string | boolean;
   source: string;
   onChange: (value: string | boolean) => void;
@@ -494,9 +504,20 @@ function KnobRow({
       }
     >
       <div className="min-w-0">
-        <code className="text-xs font-medium break-all">{name}</code>
-        <div className="mt-1 text-xs text-content-secondary">
-          {source} · restart required
+        <div className="text-sm font-medium">{knobTitle(name)}</div>
+        <code className="mt-1 block text-xs break-all text-content-secondary">
+          {name}
+        </code>
+        <p className="mt-2 max-w-prose text-xs/5 text-content-secondary">
+          {definition.description}
+        </p>
+        <div className="mt-2 text-xs text-content-secondary">
+          Source: {source} · backend restart required
+          {definition.type === "integer" &&
+          definition.min !== undefined &&
+          definition.max !== undefined
+            ? ` · allowed range ${definition.min.toLocaleString()}–${definition.max.toLocaleString()}`
+            : ""}
         </div>
       </div>
       <LabeledValue label="Declared" value={current} />
@@ -517,19 +538,116 @@ function KnobRow({
             {proposed === true ? "Enabled" : "Disabled"}
           </span>
         ) : (
-          <input
-            className="min-h-9 w-full rounded-md border bg-background-primary px-3 font-mono text-sm text-content-primary"
-            type="number"
-            value={typeof proposed === "string" ? proposed : String(proposed)}
-            min={definition.min}
-            max={definition.max}
-            onChange={(event) => onChange(event.target.value)}
-            aria-label={`Proposed value for ${name}`}
-          />
+          <div className="overflow-hidden rounded-md border bg-background-primary focus-within:border-border-selected">
+            <select
+              className="min-h-9 w-full border-0 bg-transparent px-3 text-sm text-content-primary focus:ring-0"
+              value={runtimeQuickChoiceValue(
+                proposed,
+                name,
+                recommended,
+                current,
+                definition,
+              )}
+              onChange={(event) => {
+                if (event.target.value !== "__custom__")
+                  onChange(event.target.value);
+              }}
+              aria-label={`Quick choice for ${name}`}
+            >
+              {runtimeQuickChoices(name, recommended, current, definition).map(
+                (choice) => (
+                  <option key={choice.value} value={choice.value}>
+                    {choice.label}
+                  </option>
+                ),
+              )}
+              <option value="__custom__">Custom value</option>
+            </select>
+            <input
+              className="min-h-9 w-full border-0 border-t bg-transparent px-3 font-mono text-sm text-content-primary focus:ring-0"
+              type="number"
+              value={typeof proposed === "string" ? proposed : String(proposed)}
+              min={definition.min}
+              max={definition.max}
+              onChange={(event) => onChange(event.target.value)}
+              aria-label={`Exact proposed value for ${name}`}
+            />
+          </div>
         )}
       </label>
     </div>
   );
+}
+
+function runtimeQuickChoiceValue(
+  proposed: string | boolean,
+  name: string,
+  recommended: string | number | boolean,
+  current: string | number | boolean,
+  definition: KnobDefinition,
+) {
+  const value = String(proposed);
+  return runtimeQuickChoices(name, recommended, current, definition).some(
+    (choice) => choice.value === value,
+  )
+    ? value
+    : "__custom__";
+}
+
+function runtimeQuickChoices(
+  name: string,
+  recommended: string | number | boolean,
+  current: string | number | boolean,
+  definition: KnobDefinition,
+) {
+  if (definition.type !== "integer" || typeof recommended !== "number")
+    return [];
+  const values = new Map<number, string>([[recommended, "Profile default"]]);
+  if (typeof current === "number" && current !== recommended)
+    values.set(current, "Current override");
+  for (const value of commonRuntimeValues(name)) {
+    if (
+      (definition.min === undefined || value >= definition.min) &&
+      (definition.max === undefined || value <= definition.max) &&
+      !values.has(value)
+    )
+      values.set(value, "Common choice");
+  }
+  return [...values].map(([value, source]) => ({
+    value: String(value),
+    label: `${source} · ${formatRuntimeValue(name, value)}`,
+  }));
+}
+
+function commonRuntimeValues(name: string) {
+  if (name === "POSTGRES_MAX_CONNECTIONS") return [24, 64, 128];
+  if (name === "POSTGRES_MAX_CACHED_STATEMENTS") return [0, 64, 128, 256, 512];
+  if (name.endsWith("_MILLIS")) return [100, 250, 1000, 5000, 30_000];
+  if (name.endsWith("_SECS") || name.endsWith("_SECONDS"))
+    return [30, 60, 300, 1800, 3600, 21_600];
+  if (name.endsWith("_MIB")) return [1024, 2048, 4096, 8192];
+  if (name.includes("THREAD")) return [0, 4, 8, 12, 16, 24];
+  if (name.endsWith("_BYTES"))
+    return [4, 8, 12, 16, 24, 32].map((gib) => gib * 1024 ** 3);
+  if (name.includes("CONCURRENC") || name.includes("WORKERS"))
+    return [4, 8, 16, 32, 64, 128];
+  if (name.includes("QUEUE") || name.includes("PACKAGES"))
+    return [100, 500, 1000, 2000, 5000];
+  if (name.includes("PAGE_SIZE")) return [50, 100, 250, 500, 1000];
+  if (name.includes("RESIDENTS")) return [2, 5, 8, 16, 64, 512, 1800];
+  return [];
+}
+
+function formatRuntimeValue(name: string, value: number) {
+  if (name.endsWith("_MILLIS")) return `${value.toLocaleString()} ms`;
+  if (name.endsWith("_SECS") || name.endsWith("_SECONDS"))
+    return value >= 3600 && value % 3600 === 0
+      ? `${value / 3600} h`
+      : `${value.toLocaleString()} s`;
+  if (name.endsWith("_MIB")) return `${value.toLocaleString()} MiB`;
+  if (name.endsWith("_BYTES") && value >= 1024 ** 3)
+    return `${value / 1024 ** 3} GiB`;
+  return value.toLocaleString();
 }
 
 function LabeledValue({
@@ -547,7 +665,7 @@ function LabeledValue({
         {label}
       </div>
       {unknown ? (
-        <span className="text-content-secondary">Unknown</span>
+        <span className="text-content-secondary">Not reported</span>
       ) : (
         <Value value={value} />
       )}
@@ -631,6 +749,23 @@ function knobGroup(name: string) {
   return "Runtime and privacy";
 }
 
+function knobTitle(name: string) {
+  const expandedWords: Record<string, string> = {
+    RSS: "resident memory (RSS)",
+    V8: "V8 JavaScript",
+    HTTP: "HTTP web request",
+    POSTGRES: "PostgreSQL",
+    MIB: "MiB",
+    MILLIS: "milliseconds",
+    SECS: "seconds",
+  };
+  return name
+    .split("_")
+    .map((word) => expandedWords[word] ?? word.toLowerCase())
+    .join(" ")
+    .replace(/^./, (first) => first.toUpperCase());
+}
+
 function RuntimeObservability({
   metrics,
   error,
@@ -639,19 +774,22 @@ function RuntimeObservability({
   error: Error | null;
 }) {
   const samples = metrics ? parsePrometheusSamples(metrics.exposition) : [];
+  const summary = summarizeRuntimeEvidence(samples);
+  const [showTechnical, setShowTechnical] = useState(false);
   return (
     <section
       className="rounded-lg border bg-background-secondary p-4"
       aria-labelledby="runtime-observability-title"
     >
       <h4 id="runtime-observability-title" className="font-semibold">
-        Context reuse and backpressure evidence
+        Runtime efficiency and capacity protection
       </h4>
       <p className="mt-1 max-w-prose text-sm text-content-secondary">
-        Authenticated, bounded backend counters for reusable contexts,
-        degradable-query pressure, and database cancellation. Missing series
-        means no matching activity was recorded; it is not treated as healthy.
+        A human-readable view of whether warm JavaScript contexts are saving
+        startup work and whether the server is delaying lower-priority queries
+        to protect normal traffic. Missing evidence is gray, never green.
       </p>
+      <TrafficLightLegend className="mt-3" />
       {error ? (
         <Callout variant="error" className="mt-3">
           Runtime metric evidence is unavailable: {error.message}
@@ -659,36 +797,79 @@ function RuntimeObservability({
       ) : metrics ? (
         <div className="mt-3">
           <div className="text-xs text-content-secondary">
-            Observed {new Date(metrics.observedAtUnixMs).toLocaleString()} · {metrics.familyCount}{" "}
-            metric families · {samples.length} samples
+            Observed {new Date(metrics.observedAtUnixMs).toLocaleString()} ·{" "}
+            {metrics.familyCount} metric families · {samples.length} samples
           </div>
           {samples.length === 0 ? (
             <div className="mt-3 rounded-md border bg-background-primary p-3 text-sm">
-              No matching runtime activity has been recorded in this process.
+              <HealthSignal level="unknown" label="No runtime activity yet" />
+              <p className="mt-2 text-content-secondary">
+                Run normal application traffic, then refresh. No samples does
+                not mean the feature is healthy or unhealthy.
+              </p>
             </div>
           ) : (
-            <div className="mt-3 max-h-80 overflow-auto rounded-md border bg-background-primary">
-              <table className="w-full text-left text-xs">
-                <thead className="sticky top-0 bg-background-tertiary">
-                  <tr>
-                    <th className="px-3 py-2 font-medium">Metric series</th>
-                    <th className="px-3 py-2 text-right font-medium">Value</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y">
-                  {samples.map((sample) => (
-                    <tr key={sample.series}>
-                      <td className="px-3 py-2 font-mono break-all">
-                        {sample.series}
-                      </td>
-                      <td className="px-3 py-2 text-right font-mono">
-                        {sample.value}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <>
+              <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                {summary.map((item) => (
+                  <div
+                    key={item.title}
+                    className="rounded-lg border bg-background-primary p-4"
+                  >
+                    <HealthSignal
+                      level={item.level}
+                      label={item.status}
+                      compact
+                    />
+                    <div className="mt-3 font-semibold">{item.title}</div>
+                    <h5 className="mt-1 font-semibold tabular-nums">
+                      {item.value}
+                    </h5>
+                    <p className="mt-2 text-xs/relaxed text-content-secondary">
+                      {item.explanation}
+                    </p>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 rounded-md border bg-background-primary">
+                <Button
+                  variant="unstyled"
+                  className="w-full justify-start px-3 py-2 text-xs font-medium text-content-secondary"
+                  onClick={() => setShowTechnical((value) => !value)}
+                  aria-expanded={showTechnical}
+                >
+                  Technical metric details ({samples.length} samples)
+                </Button>
+                {showTechnical ? (
+                  <div className="max-h-80 overflow-auto border-t">
+                    <table className="w-full text-left text-xs">
+                      <thead className="sticky top-0 bg-background-tertiary">
+                        <tr>
+                          <th className="px-3 py-2 font-medium">
+                            Metric series
+                          </th>
+                          <th className="px-3 py-2 text-right font-medium">
+                            Value
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y">
+                        {samples.map((sample) => (
+                          <tr key={sample.series}>
+                            <td className="px-3 py-2 font-mono break-all">
+                              {sample.series}
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono">
+                              {sample.value}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : null}
+              </div>
+            </>
           )}
         </div>
       ) : (
@@ -706,8 +887,124 @@ function parsePrometheusSamples(exposition: string) {
     .filter((line) => line !== "" && !line.startsWith("#"))
     .flatMap((line) => {
       const match = /^(\S+)\s+([^\s]+)(?:\s+\d+)?$/.exec(line);
-      return match ? [{ series: match[1], value: match[2] }] : [];
+      if (!match) return [];
+      const name = match[1].split("{", 1)[0];
+      const labels = Object.fromEntries(
+        [...match[1].matchAll(/([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"/g)].map(
+          (label) => [label[1], label[2]],
+        ),
+      );
+      return [
+        {
+          series: match[1],
+          name,
+          labels,
+          value: match[2],
+          numericValue: Number(match[2]),
+        },
+      ];
     });
+}
+
+type RuntimeSample = ReturnType<typeof parsePrometheusSamples>[number];
+
+function summarizeRuntimeEvidence(samples: RuntimeSample[]) {
+  const sum = (family: string, label?: [string, string]) =>
+    samples
+      .filter(
+        (sample) =>
+          sample.name.endsWith(family) &&
+          (!label || sample.labels[label[0]] === label[1]) &&
+          Number.isFinite(sample.numericValue),
+      )
+      .reduce((total, sample) => total + sample.numericValue, 0);
+
+  const hits = sum("database_udf_context_reuse_lookup_total", [
+    "outcome",
+    "hit",
+  ]);
+  const misses = ["not_found", "validation_failed", "validation_error"].reduce(
+    (total, outcome) =>
+      total +
+      sum("database_udf_context_reuse_lookup_total", ["outcome", outcome]),
+    0,
+  );
+  const lookups = hits + misses;
+  const reuseRate = lookups ? hits / lookups : null;
+  const validationErrors = sum("database_udf_context_reuse_lookup_total", [
+    "outcome",
+    "validation_error",
+  ]);
+  const pressureActive = sum("sync_degradable_query_pressure_lifecycle_total", [
+    "state",
+    "active",
+  ]);
+  const pressureCleared = sum(
+    "sync_degradable_query_pressure_lifecycle_total",
+    ["state", "cleared"],
+  );
+  const pressureNow = Math.max(0, pressureActive - pressureCleared);
+  const deferrals = sum("sync_degradable_query_deferrals_total");
+  const cancellations = sum("postgres_cancellation_requested_total");
+  const cancellationFailures = sum("postgres_cancellation_terminal_total", [
+    "outcome",
+    "failed",
+  ]);
+
+  const reuseLevel: SignalLevel = validationErrors
+    ? "critical"
+    : reuseRate === null
+      ? "unknown"
+      : reuseRate >= 0.6
+        ? "healthy"
+        : reuseRate >= 0.25
+          ? "attention"
+          : "unknown";
+  const pressureLevel: SignalLevel = pressureNow > 0 ? "attention" : "healthy";
+  const cancellationLevel: SignalLevel = cancellationFailures
+    ? "critical"
+    : cancellations
+      ? "healthy"
+      : "unknown";
+
+  return [
+    {
+      title: "Warm-context reuse",
+      value:
+        reuseRate === null ? "No traffic" : `${Math.round(reuseRate * 100)}%`,
+      level: reuseLevel,
+      status: validationErrors
+        ? "Validation errors"
+        : reuseRate === null
+          ? "No evidence"
+          : reuseRate >= 0.6
+            ? "Efficient"
+            : "Review efficiency",
+      explanation:
+        "Share of eligible queries and mutations that reused an already-initialized JavaScript context. Higher is faster; a miss is safe and simply performs a normal initialization.",
+    },
+    {
+      title: "Capacity protection",
+      value: pressureNow ? `${pressureNow} active` : "Clear",
+      level: pressureLevel,
+      status: pressureNow ? "Attention" : "Healthy",
+      explanation: pressureNow
+        ? `${deferrals.toLocaleString()} lower-priority query deferrals have protected normal traffic. Active pressure means users may temporarily see stale data.`
+        : `${deferrals.toLocaleString()} historical deferrals. No capacity-pressure episode is active now.`,
+    },
+    {
+      title: "Cancelled database work",
+      value: cancellations.toLocaleString(),
+      level: cancellationLevel,
+      status: cancellationFailures
+        ? "Cancellation failures"
+        : cancellations
+          ? "Working"
+          : "No evidence",
+      explanation:
+        "Requests abandoned by clients should cancel their PostgreSQL work. Zero is normal when no requests were cancelled; failures require immediate investigation.",
+    },
+  ];
 }
 
 async function fetchRuntimeMetrics(
@@ -726,7 +1023,9 @@ async function fetchRuntimeMetrics(
     },
   );
   if (!response.ok) {
-    throw new Error(`Backend returned ${response.status} ${response.statusText}`);
+    throw new Error(
+      `Backend returned ${response.status} ${response.statusText}`,
+    );
   }
   return (await response.json()) as RuntimeMetrics;
 }
@@ -770,12 +1069,14 @@ function validateProposed(
 }
 
 function formatBytes(value: number) {
-  return `${(value / 1024 ** 3).toFixed(0)} GiB`;
+  return `${(value / 1024 ** 3).toFixed(0)} gibibytes`;
 }
 
 function formatDate(value: string) {
   const date = new Date(value);
-  return Number.isFinite(date.getTime()) ? date.toLocaleString() : "unknown";
+  return Number.isFinite(date.getTime())
+    ? date.toLocaleString()
+    : "Invalid timestamp";
 }
 
 function asError(value: unknown): OperatorApiError | Error {
