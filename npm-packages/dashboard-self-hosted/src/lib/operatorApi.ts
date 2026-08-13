@@ -242,6 +242,8 @@ export type ApplicationOperations = {
   }>;
   authBridge: {
     installed: boolean;
+    variant: "managed" | "legacy" | null;
+    retrySupported: boolean;
     pending: number;
     retrying: number;
     deadLettered: number;
