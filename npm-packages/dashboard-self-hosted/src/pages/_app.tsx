@@ -29,6 +29,7 @@ import { checkDeploymentInfo } from "lib/checkDeploymentInfo";
 import { ConvexCloudReminderToast } from "components/ConvexCloudReminderToast";
 import { UIProvider } from "@ui/UIContext";
 import Link from "next/link";
+import { useRouter } from "next/router";
 import { SelfHostedCommandPalette } from "components/SelfHostedCommandPalette";
 import {
   OperatorConfiguration,
@@ -43,11 +44,15 @@ import {
 } from "lib/backendCapabilities";
 import { SelfHostedSettingsContext } from "lib/selfHostedSettings";
 import { FleetSwitcher } from "components/fleet/FleetSwitcher";
+import { OperatorActionTray } from "components/operator/OperatorActionTracker";
+import { OperatorEvidenceFreshness } from "components/operator/OperatorEvidenceFreshness";
+import { OperatorStateProvider } from "components/operator/useOperatorState";
 import {
   FleetDeployment,
   fleetBootstrap,
   issueFleetDashboardCredential,
 } from "lib/fleetApi";
+import { isFleetDeploymentId } from "lib/fleetSelection";
 
 if (process.env.NEXT_PUBLIC_LOAD_MONACO_INTERNALLY === "true") {
   import("../lib/monacoInternalLoader").then((a) => a).catch(console.error);
@@ -126,21 +131,24 @@ function DashboardSurface({
   deploymentId?: string;
 }) {
   return (
-    <DeploymentInfoProvider
-      deploymentUrl={deploymentUrl}
-      deploymentId={deploymentId}
-    >
-      <DeploymentApiProvider deploymentOverride="local">
-        <WaitForDeploymentApi>
-          <DeploymentDashboardLayoutWrapper>
-            <>
-              <Component {...pageProps} />
-              <ConvexCloudReminderToast />
-            </>
-          </DeploymentDashboardLayoutWrapper>
-        </WaitForDeploymentApi>
-      </DeploymentApiProvider>
-    </DeploymentInfoProvider>
+    <OperatorStateProvider>
+      <DeploymentInfoProvider
+        deploymentUrl={deploymentUrl}
+        deploymentId={deploymentId}
+      >
+        <DeploymentApiProvider deploymentOverride="local">
+          <WaitForDeploymentApi>
+            <DeploymentDashboardLayoutWrapper>
+              <>
+                <Component {...pageProps} />
+                <ConvexCloudReminderToast />
+                <OperatorActionTray scope={deploymentId ?? "standalone"} />
+              </>
+            </DeploymentDashboardLayoutWrapper>
+          </WaitForDeploymentApi>
+        </DeploymentApiProvider>
+      </DeploymentInfoProvider>
+    </OperatorStateProvider>
   );
 }
 
@@ -151,18 +159,53 @@ function SharedFleetDashboard({
   Component: AppProps["Component"];
   pageProps: Record<string, unknown>;
 }) {
+  const router = useRouter();
   const [deployment, setDeployment] = useState<FleetDeployment | null>(null);
   const [error, setError] = useState<Error | null>(null);
+  const queryDeployment = router.query.deployment;
+  const requestedDeployment = isFleetDeploymentId(queryDeployment)
+    ? queryDeployment
+    : null;
+  const invalidSelection =
+    router.isReady &&
+    queryDeployment !== undefined &&
+    requestedDeployment === null;
 
   useEffect(() => {
+    if (!router.isReady) return undefined;
     let active = true;
-    const requested =
-      new URLSearchParams(window.location.search).get("deployment") ??
-      window.sessionStorage.getItem("convex-fleet-deployment");
-    if (!requested || !/^dep_[a-f0-9]{32}$/.test(requested)) {
-      window.location.replace("/fleet");
-      return;
+    const requested = requestedDeployment;
+    if (!requested && queryDeployment !== undefined) {
+      selectFleetOperatorDeployment(null);
+      setDeployment(null);
+      setError(new Error("The selected deployment ID is invalid"));
+      return undefined;
     }
+    if (!requested) {
+      const fallback =
+        deployment?.id ??
+        window.sessionStorage.getItem("convex-fleet-deployment");
+      if (isFleetDeploymentId(fallback)) {
+        void router.replace(
+          {
+            pathname: router.pathname,
+            query: { ...router.query, deployment: fallback },
+          },
+          undefined,
+          { shallow: true },
+        );
+        return undefined;
+      }
+      window.location.replace("/fleet");
+      return undefined;
+    }
+    setError(null);
+    if (deployment?.id === requested) {
+      selectFleetOperatorDeployment(requested);
+      return undefined;
+    }
+    selectFleetOperatorDeployment(null);
+    setDeployment(null);
     void fleetBootstrap()
       .then((fleet) => {
         const selected = fleet.deployments.find(
@@ -186,29 +229,29 @@ function SharedFleetDashboard({
     return () => {
       active = false;
     };
-  }, []);
+  }, [
+    deployment?.id,
+    queryDeployment,
+    requestedDeployment,
+    router,
+    router.isReady,
+    router.pathname,
+  ]);
 
-  if (error) {
+  if (invalidSelection) {
     return (
-      <div className="flex h-screen items-center justify-center px-6 text-center">
-        <div className="max-w-lg rounded-lg border bg-background-secondary p-5">
-          <div className="font-medium">Deployment access failed</div>
-          <div className="mt-1 text-sm text-content-secondary">
-            {error.message}
-          </div>
-          <Button href="/fleet" className="mt-4" size="sm" variant="neutral">
-            Return to fleet manager
-          </Button>
-        </div>
-      </div>
+      <DeploymentSelectionError message="The selected deployment ID is invalid" />
     );
   }
+  if (requestedDeployment && deployment?.id !== requestedDeployment) {
+    return <DeploymentSelectionLoading />;
+  }
+
+  if (error) {
+    return <DeploymentSelectionError message={error.message} />;
+  }
   if (!deployment?.deploymentUrl) {
-    return (
-      <div className="flex h-screen items-center justify-center text-sm text-content-secondary">
-        Loading the selected deployment…
-      </div>
-    );
+    return <DeploymentSelectionLoading />;
   }
   return (
     <DashboardSurface
@@ -217,6 +260,28 @@ function SharedFleetDashboard({
       deploymentUrl={deployment.deploymentUrl}
       deploymentId={deployment.id}
     />
+  );
+}
+
+function DeploymentSelectionLoading() {
+  return (
+    <div className="flex h-screen items-center justify-center text-sm text-content-secondary">
+      Loading the selected deployment…
+    </div>
+  );
+}
+
+function DeploymentSelectionError({ message }: { message: string }) {
+  return (
+    <div className="flex h-screen items-center justify-center px-6 text-center">
+      <div className="max-w-lg rounded-lg border bg-background-secondary p-5">
+        <div className="font-medium">Deployment access failed</div>
+        <div className="mt-1 text-sm text-content-secondary">{message}</div>
+        <Button href="/fleet" className="mt-4" size="sm" variant="neutral">
+          Return to fleet manager
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -520,7 +585,7 @@ function DeploymentInfoProvider({
         useIsOperationAllowed: (operation: string) =>
           credential?.allowedOps.includes(operation) ?? false,
         useIsProtectedDeployment: () => dashboardEditConfirmation,
-      } as DeploymentInfo),
+      }) as DeploymentInfo,
     [credential, dashboardEditConfirmation, deploymentUrl],
   );
   const [mounted, setMounted] = useState(false);
@@ -587,18 +652,22 @@ function Header({ deploymentUrl }: { deploymentUrl: string }) {
         </Link>
         <FleetSwitcher deploymentUrl={deploymentUrl} />
       </div>
-      <Menu
-        buttonProps={{
-          icon: (
-            <GearIcon className="size-7 rounded-sm p-1 text-content-primary hover:bg-background-tertiary" />
-          ),
-          variant: "unstyled",
-          "aria-label": "Dashboard Settings",
-        }}
-        placement="bottom-end"
-      >
-        <ToggleTheme />
-      </Menu>
+      <div className="flex items-center gap-2">
+        <OperatorEvidenceFreshness />
+        <span className="hidden w-32 sm:block" aria-hidden="true" />
+        <Menu
+          buttonProps={{
+            icon: (
+              <GearIcon className="size-7 rounded-sm p-1 text-content-primary hover:bg-background-tertiary" />
+            ),
+            variant: "unstyled",
+            "aria-label": "Dashboard Settings",
+          }}
+          placement="bottom-end"
+        >
+          <ToggleTheme />
+        </Menu>
+      </div>
     </header>
   );
 }

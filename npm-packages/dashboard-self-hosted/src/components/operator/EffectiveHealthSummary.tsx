@@ -20,16 +20,16 @@ export function EffectiveHealthSummary({
 }) {
   const findings = effectiveHealthFindings(configuration, status);
   const level = signalForState(status?.health.state);
-  const state = status?.health.state ?? "unavailable";
+  const state = status?.health.state ?? "unknown";
   const healthHeadline =
     state === "healthy"
       ? "The instance serving path is healthy"
       : state === "degraded"
       ? "The instance serving path is degraded"
-      : "Instance health is unavailable";
-  const operationalCount = findings.filter(
-    (finding) => !finding.affectsHealth,
-  ).length;
+      : state === "unavailable"
+      ? "The instance serving path is unavailable"
+      : "Instance health is unknown";
+  const actionCount = findings.length;
 
   return (
     <section
@@ -39,7 +39,9 @@ export function EffectiveHealthSummary({
           ? "border-content-error"
           : level === "attention"
           ? "border-content-warning"
-          : "border-content-success",
+          : level === "healthy"
+          ? "border-content-success"
+          : "border-border-transparent"
       )}
       aria-labelledby="effective-health-title"
     >
@@ -53,16 +55,14 @@ export function EffectiveHealthSummary({
           </div>
           <p className="mt-1 text-sm font-medium">{healthHeadline}</p>
           <p className="mt-1 text-sm text-content-secondary">
-            Health covers the active runtime, PostgreSQL, and object storage.
-            Backups, recovery drills, release attempts, exposure verification,
-            credentials, and alert delivery are tracked separately as
-            operational follow-ups.
+            Production checks focus on serving, persistence, verified backups,
+            private admin access, and alert delivery. Routine tuning and
+            unproven optional checks stay out of the warning list.
           </p>
-          {operationalCount > 0 ? (
+          {actionCount > 0 ? (
             <p className="mt-2 text-xs text-content-secondary">
-              {operationalCount} operational{" "}
-              {operationalCount === 1 ? "follow-up is" : "follow-ups are"}{" "}
-              listed below without changing instance health.
+              {actionCount} production {actionCount === 1 ? "item" : "items"}{" "}
+              need attention.
             </p>
           ) : null}
         </div>
@@ -88,7 +88,7 @@ export function EffectiveHealthSummary({
                   "grid size-7 place-items-center rounded-full text-xs font-semibold",
                   finding.level === "critical"
                     ? "bg-background-error text-content-error"
-                    : "bg-background-warning text-content-warning",
+                    : "bg-background-warning text-content-warning"
                 )}
                 aria-hidden="true"
               >
@@ -112,7 +112,7 @@ export function EffectiveHealthSummary({
                 <p className="mt-1 text-sm text-content-secondary">
                   {finding.impact}
                 </p>
-                <p className="mt-2 text-sm">
+                <p className="mt-1 text-sm">
                   <span className="font-medium">Next action:</span>{" "}
                   {finding.action}
                 </p>
@@ -122,8 +122,7 @@ export function EffectiveHealthSummary({
         </ol>
       ) : (
         <div className="border-t bg-background-success px-4 py-3 text-sm text-content-success sm:px-5">
-          All monitored checks are current and healthy. Continue normal
-          operation; no intervention is recommended.
+          No production-critical action is needed.
         </div>
       )}
     </section>
@@ -132,7 +131,7 @@ export function EffectiveHealthSummary({
 
 export function effectiveHealthFindings(
   configuration: OperatorConfiguration,
-  status: OperatorStatus | null,
+  status: OperatorStatus | null
 ): HealthFinding[] {
   if (!status) {
     return [
@@ -148,7 +147,10 @@ export function effectiveHealthFindings(
   }
 
   const findings: HealthFinding[] = [];
-  if (status.freshness.state !== "current") {
+  if (
+    status.freshness.state !== "current" &&
+    status.freshness.ageSeconds > status.freshness.maxAgeSeconds * 2
+  ) {
     findings.push({
       level: "attention",
       affectsHealth: false,
@@ -167,22 +169,13 @@ export function effectiveHealthFindings(
         "The operator has no active runtime revision to compare with configuration.",
       action: "Open Runtime and verify or restart the deployment.",
     });
-  } else if (status.runtime.restartPending) {
-    findings.push({
-      level: "attention",
-      affectsHealth: true,
-      title: "A restart is pending",
-      impact: `Revision ${configuration.revision} is saved but is not fully effective in the running backend.`,
-      action:
-        "Open Runtime, review the pending changes, then confirm a restart.",
-    });
   }
 
   providerFinding(findings, "PostgreSQL", status.providers.database.state);
   providerFinding(
     findings,
     "Object storage",
-    status.providers.objectStorage.state,
+    status.providers.objectStorage.state
   );
 
   const scheduler = status.backups.scheduler;
@@ -234,11 +227,7 @@ export function effectiveHealthFindings(
   exposureFindings(findings, status);
 
   const overdue = status.security.credentials.filter(
-    (credential) => credential.state === "overdue",
-  );
-  const due = status.security.credentials.filter(
-    (credential) =>
-      credential.state === "due" || credential.state === "unknown",
+    (credential) => credential.state === "overdue"
   );
   if (overdue.length > 0) {
     findings.push({
@@ -249,16 +238,6 @@ export function effectiveHealthFindings(
       } overdue`,
       impact: "Credential rotation is outside the configured safety window.",
       action: "Open Security and rotate the listed credentials.",
-    });
-  } else if (due.length > 0) {
-    findings.push({
-      level: "attention",
-      affectsHealth: false,
-      title: `${due.length} credential ${
-        due.length === 1 ? "needs" : "need"
-      } review`,
-      impact: "Rotation is due or its current age has not been verified.",
-      action: "Open Security and review credential rotation dates.",
     });
   }
 
@@ -303,7 +282,7 @@ export function effectiveHealthFindings(
 function providerFinding(
   findings: HealthFinding[],
   label: string,
-  state: OperatorStatus["providers"]["database"]["state"],
+  state: OperatorStatus["providers"]["database"]["state"]
 ) {
   if (state === "healthy") return;
   findings.push({
@@ -331,19 +310,6 @@ function exposureFindings(findings: HealthFinding[], status: OperatorStatus) {
         "Private operational surfaces are exposed outside the Tailscale boundary.",
       action:
         "Open Security, remove public access, then rerun the off-host exposure check.",
-    });
-  } else if (
-    publicAdminReachable === null ||
-    metricsPubliclyReachable === null
-  ) {
-    findings.push({
-      level: "attention",
-      affectsHealth: false,
-      title: "Private exposure has not been verified off-host",
-      impact:
-        "The runtime may be healthy, but the dashboard cannot prove that admin and metrics endpoints are private.",
-      action:
-        "Configure the off-host exposure monitor, then open Security and confirm both checks read Private.",
     });
   }
 }

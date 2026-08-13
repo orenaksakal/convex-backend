@@ -1,11 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
+import {
+  Disclosure,
+  DisclosureButton,
+  DisclosurePanel,
+} from "@headlessui/react";
 import { DeploymentSettingsLayout } from "@common/layouts/DeploymentSettingsLayout";
 import { useDeploymentUrl } from "@common/lib/deploymentApi";
 import { Button } from "@ui/Button";
 import { Callout } from "@ui/Callout";
 import { OperatorActionConfirmation } from "../../components/operator/OperatorActionConfirmation";
+import { ConfirmationPhrase } from "../../components/operator/ConfirmationPhrase";
 import {
-  EvidenceCard,
+  HealthSignal,
+  SignalLevel,
+} from "../../components/operator/HealthSignal";
+import {
   formatOperatorDate,
   OperatorError,
   OperatorField,
@@ -13,6 +22,7 @@ import {
   OperatorNumberPresetField,
   operatorInputClasses,
 } from "../../components/operator/OperatorPagePrimitives";
+import { exposureProbePresentation } from "../../components/operator/TruthfulEvidence";
 import { useOperatorState } from "../../components/operator/useOperatorState";
 import {
   DeployCredential,
@@ -20,6 +30,7 @@ import {
   IssuedDeployCredential,
   operatorGet,
   operatorMutation,
+  OperatorStatus,
   PreparedOperatorAction,
 } from "../../lib/operatorApi";
 
@@ -105,7 +116,9 @@ export default function SecurityPage() {
   const [issuedDeployCredential, setIssuedDeployCredential] =
     useState<IssuedDeployCredential | null>(null);
   const deployCommand = issuedDeployCredential
-    ? `npx convex deploy --url ${JSON.stringify(deploymentUrl)} --admin-key ${JSON.stringify(issuedDeployCredential.token)}`
+    ? `npx convex deploy --url ${JSON.stringify(
+        deploymentUrl
+      )} --admin-key ${JSON.stringify(issuedDeployCredential.token)}`
     : null;
   const [deployConfirmation, setDeployConfirmation] =
     useState<DeployConfirmation | null>(null);
@@ -120,7 +133,7 @@ export default function SecurityPage() {
     }
     let active = true;
     void operatorGet<{ credentials: DeployCredential[] }>(
-      "/v1/deploy-credentials",
+      "/v1/deploy-credentials"
     )
       .then((result) => {
         if (active) setDeployCredentials(result.credentials);
@@ -211,8 +224,8 @@ export default function SecurityPage() {
             instanceId: operator.configuration.instance.id,
             baseRevision: operator.configuration.revision,
             parameters: { credentialAlias },
-          },
-        ),
+          }
+        )
       );
     } catch (requestError) {
       setSessionError(asError(requestError));
@@ -221,7 +234,7 @@ export default function SecurityPage() {
 
   async function refreshDeployCredentials() {
     const result = await operatorGet<{ credentials: DeployCredential[] }>(
-      "/v1/deploy-credentials",
+      "/v1/deploy-credentials"
     );
     setDeployCredentials(result.credentials);
   }
@@ -245,7 +258,7 @@ export default function SecurityPage() {
       const issued = await operatorMutation<IssuedDeployCredential>(
         "/v1/deploy-credentials",
         "POST",
-        { label: deployLabel, expiresInDays: deployExpiryDays },
+        { label: deployLabel, expiresInDays: deployExpiryDays }
       );
       setIssuedDeployCredential(issued);
       setDeployLabel("");
@@ -270,16 +283,16 @@ export default function SecurityPage() {
         const issued = await operatorMutation<IssuedDeployCredential>(
           `/v1/deploy-credentials/${deployConfirmation.credential.id}/rotate`,
           "POST",
-          { expiresInDays: deployExpiryDays },
+          { expiresInDays: deployExpiryDays }
         );
         setIssuedDeployCredential(issued);
       } else {
         await operatorMutation<DeployCredential>(
           `/v1/deploy-credentials/${deployConfirmation.credential.id}`,
-          "DELETE",
+          "DELETE"
         );
         setMessage(
-          `Deploy credential ${deployConfirmation.credential.label} was revoked immediately.`,
+          `Deploy-only key ${deployConfirmation.credential.label} was revoked immediately.`
         );
       }
       setDeployConfirmation(null);
@@ -295,23 +308,35 @@ export default function SecurityPage() {
   const effectiveRedaction =
     status?.runtime.effectiveKnobs?.REDACT_LOGS_TO_CLIENT;
   const evidenceIsCurrent = status?.freshness.state === "current";
+  const adminExposure = exposureProbePresentation(
+    status?.security.publicAdminReachable,
+    evidenceIsCurrent,
+    "Administrative endpoints"
+  );
+  const metricsExposure = exposureProbePresentation(
+    status?.security.metricsPubliclyReachable,
+    evidenceIsCurrent,
+    "The monitoring endpoint"
+  );
+  const exposureCheckedAt = status
+    ? ` Last checked ${formatOperatorDate(status.security.checkedAt)}.`
+    : "";
   const credentialReferences = form
     ? [
         {
-          label: "Dashboard signing",
+          label: "Dashboard access key",
           alias: form.dashboardCredentialRef,
-          detail: "Five-minute deployment credentials issued by the operator",
+          detail: "Protects sign-in sessions for this deployment's dashboard",
         },
         {
-          label: "PostgreSQL",
+          label: "Database password",
           alias: operator.configuration?.providers.database.credentialRef,
-          detail: "Application database login selected on General",
+          detail: "Connects this deployment to its PostgreSQL database",
         },
         {
-          label: "Object storage",
+          label: "File storage key",
           alias: operator.configuration?.providers.objectStorage.credentialRef,
-          detail:
-            "Amazon S3-compatible or Cloudflare R2 object-storage credential selected on General",
+          detail: "Connects this deployment to its stored files",
         },
       ]
     : [];
@@ -322,7 +347,7 @@ export default function SecurityPage() {
     (reference) => {
       const credential = reference.alias
         ? status?.security.credentials.find(
-            (item) => item.alias === reference.alias,
+            (item) => item.alias === reference.alias
           )
         : undefined;
       return (
@@ -332,7 +357,7 @@ export default function SecurityPage() {
             credential.lastRotatedAt !== null ||
             credential.rotationDueAt !== null))
       );
-    },
+    }
   );
 
   return (
@@ -385,60 +410,64 @@ export default function SecurityPage() {
 
         {operator.configuration && form && !operator.loading && (
           <>
-            <section
-              className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"
-              aria-label="Security evidence"
-            >
-              <EvidenceCard
-                label="Admin exposure"
-                value={probeLabel(status?.security.publicAdminReachable)}
-                detail={
-                  status
-                    ? `Checked ${formatOperatorDate(status.security.checkedAt)}`
-                    : "No validated exposure probe"
-                }
-                warning={
-                  !evidenceIsCurrent ||
-                  status?.security.publicAdminReachable !== false
-                }
-              />
-              <EvidenceCard
-                label="Metrics exposure"
-                value={probeLabel(status?.security.metricsPubliclyReachable)}
-                detail="Metrics must remain on the private operator network"
-                warning={
-                  !evidenceIsCurrent ||
-                  status?.security.metricsPubliclyReachable !== false
-                }
-              />
-              <EvidenceCard
-                label="Client-log redaction"
-                value={
-                  effectiveRedaction === true
-                    ? "Effective"
-                    : effectiveRedaction === false
+            <section className="overflow-hidden rounded-lg border bg-background-secondary">
+              <div className="border-b px-4 py-3">
+                <h4 className="font-semibold">Security checks</h4>
+                <p className="mt-1 text-sm text-content-secondary">
+                  Make sure the dashboard is private and its security settings
+                  are up to date.
+                </p>
+              </div>
+              <div className="divide-y">
+                <PostureRow
+                  label="Administrative endpoint exposure"
+                  value={adminExposure.label}
+                  detail={`${adminExposure.detail}${exposureCheckedAt}`}
+                  level={adminExposure.level}
+                />
+                <PostureRow
+                  label="Monitoring endpoint exposure"
+                  value={metricsExposure.label}
+                  detail={`${metricsExposure.detail}${exposureCheckedAt}`}
+                  level={metricsExposure.level}
+                />
+                <PostureRow
+                  label="Client-log redaction"
+                  value={
+                    !evidenceIsCurrent
+                      ? "Unknown"
+                      : effectiveRedaction === true
+                      ? "Effective"
+                      : effectiveRedaction === false
                       ? "Disabled"
                       : "Not observed"
-                }
-                detail={`Declared ${operator.configuration.runtime.knobs.REDACT_LOGS_TO_CLIENT === true ? "enabled" : "disabled"} on General`}
-                warning={
-                  !evidenceIsCurrent ||
-                  effectiveRedaction !==
-                    (operator.configuration.runtime.knobs
-                      .REDACT_LOGS_TO_CLIENT ===
-                      true)
-                }
-              />
-              <EvidenceCard
-                label="Status freshness"
-                value={status?.freshness.state ?? "Unavailable"}
-                detail={
-                  status
-                    ? `${status.freshness.ageSeconds}s old; maximum ${status.freshness.maxAgeSeconds}s`
-                    : "No validated status provider"
-                }
-                warning={!evidenceIsCurrent}
-              />
+                  }
+                  detail="Prevents sensitive function details reaching clients"
+                  level={
+                    !evidenceIsCurrent || effectiveRedaction === undefined
+                      ? "unknown"
+                      : effectiveRedaction === true
+                      ? "healthy"
+                      : "attention"
+                  }
+                />
+                <PostureRow
+                  label="Evidence"
+                  value={status?.freshness.state ?? "Unknown"}
+                  detail={
+                    status
+                      ? `${status.freshness.ageSeconds}s old`
+                      : "No validated status"
+                  }
+                  level={
+                    !status
+                      ? "unknown"
+                      : evidenceIsCurrent
+                      ? "healthy"
+                      : "attention"
+                  }
+                />
+              </div>
             </section>
 
             {deployCredentialCapability?.read && (
@@ -447,28 +476,35 @@ export default function SecurityPage() {
                 aria-labelledby="deploy-credentials-title"
               >
                 <h4 id="deploy-credentials-title" className="font-semibold">
-                  Command-line and automation deploy credentials
+                  Deploy-only access for CLI and CI
                 </h4>
                 <p className="mt-1 max-w-prose text-sm text-content-secondary">
-                  Create credentials for the command-line interface (CLI) or a
-                  continuous-integration (CI) workflow, restricted by the
-                  backend to the single
-                  <code className="mx-1">Deploy</code> operation. Revocation is
-                  checked on every use. Secret values are shown once and are
-                  never stored by the operator or browser.
+                  Create a separate key for each developer or automation
+                  workflow that deploys code to this instance. These keys can
+                  only deploy; they cannot perform other administrator actions.
+                  Each key can be revoked independently and is shown only once.
                 </p>
-                <Callout variant="instructions" className="mt-3">
-                  These self-hosted credentials are not Convex Cloud deploy
-                  keys. Do not put one in <code>CONVEX_DEPLOY_KEY</code>. Pass
-                  both the deployment URL and credential using the exact
-                  command shown after creation, or configure
-                  <code className="mx-1">CONVEX_SELF_HOSTED_URL</code> and
-                  <code>CONVEX_SELF_HOSTED_ADMIN_KEY</code> together.
+                <Callout variant="instructions" className="mt-3 block">
+                  <div className="font-medium">
+                    Why does the Convex CLI call this an admin key?
+                  </div>
+                  <p className="mt-1">
+                    The CLI uses the option <code>--admin-key</code> and the
+                    variable <code>CONVEX_SELF_HOSTED_ADMIN_KEY</code> for
+                    self-hosted access. Despite that name, a key created here is
+                    restricted to deploying code. Use it together with
+                    <code className="mx-1">CONVEX_SELF_HOSTED_URL</code>, as
+                    shown in the command after creation.
+                  </p>
+                  <p className="mt-2">
+                    <code>CONVEX_DEPLOY_KEY</code> is for Convex Cloud and will
+                    not work with this self-hosted key.
+                  </p>
                 </Callout>
 
                 <div className="mt-4 grid gap-4 sm:grid-cols-[minmax(0,1fr)_10rem_auto] sm:items-end">
                   <OperatorField
-                    label="Credential label"
+                    label="Key name"
                     description="A descriptive name for the workflow or machine."
                   >
                     <input
@@ -481,7 +517,7 @@ export default function SecurityPage() {
                   </OperatorField>
                   <OperatorNumberPresetField
                     label="Expires in days"
-                    description="Shorter credentials limit exposure; choose a common rotation interval or set an exact duration."
+                    description="Shorter-lived keys are safer; choose a common replacement interval or set an exact duration."
                     value={deployExpiryDays}
                     presets={DEPLOY_EXPIRY_PRESETS}
                     min={1}
@@ -503,7 +539,7 @@ export default function SecurityPage() {
                     loading={deployBusy}
                     onClick={() => void createDeployCredential()}
                   >
-                    Create credential
+                    Create deploy-only key
                   </Button>
                 </div>
 
@@ -511,7 +547,8 @@ export default function SecurityPage() {
                   <Callout variant="success">
                     <div className="flex flex-col gap-2">
                       <div className="font-semibold">
-                        Copy this secret now. It will not be shown again.
+                        Copy this deploy-only key now. It will not be shown
+                        again.
                       </div>
                       <code className="rounded-sm bg-background-tertiary p-3 text-xs break-all">
                         {issuedDeployCredential.token}
@@ -531,15 +568,15 @@ export default function SecurityPage() {
                               .writeText(issuedDeployCredential.token)
                               .then(() =>
                                 setMessage(
-                                  "Deploy credential copied to the clipboard.",
-                                ),
+                                  "Deploy-only key copied to the clipboard."
+                                )
                               )
                               .catch((error) =>
-                                setSessionError(asError(error)),
+                                setSessionError(asError(error))
                               );
                           }}
                         >
-                          Copy secret
+                          Copy key
                         </Button>
                         <Button
                           size="xs"
@@ -549,11 +586,11 @@ export default function SecurityPage() {
                               .writeText(deployCommand)
                               .then(() =>
                                 setMessage(
-                                  "Deploy command copied to the clipboard.",
-                                ),
+                                  "Deploy command copied to the clipboard."
+                                )
                               )
                               .catch((error) =>
-                                setSessionError(asError(error)),
+                                setSessionError(asError(error))
                               );
                           }}
                         >
@@ -584,16 +621,17 @@ export default function SecurityPage() {
                       Confirm {deployConfirmation.kind}
                     </div>
                     <p className="mt-1 text-content-secondary">
-                      This immediately invalidates the existing credential.
+                      This immediately invalidates the existing key.
                       {deployConfirmation.kind === "rotate"
                         ? " A replacement secret will be shown once."
                         : " Running deployments that still use it will fail."}
                     </p>
+                    <ConfirmationPhrase
+                      className="mt-3 max-w-xl"
+                      value={`${deployConfirmation.kind} ${deployConfirmation.credential.id}`}
+                    />
                     <label className="mt-3 flex max-w-xl flex-col gap-1">
-                      <span>
-                        Type{" "}
-                        <code>{`${deployConfirmation.kind} ${deployConfirmation.credential.id}`}</code>
-                      </span>
+                      <span>Paste confirmation text</span>
                       <input
                         className={operatorInputClasses}
                         value={deployConfirmation.value}
@@ -617,8 +655,8 @@ export default function SecurityPage() {
                         onClick={() => void executeDeployCredentialChange()}
                       >
                         {deployConfirmation.kind === "rotate"
-                          ? "Rotate credential"
-                          : "Revoke credential"}
+                          ? "Replace key"
+                          : "Revoke key"}
                       </Button>
                       <Button
                         variant="neutral"
@@ -657,7 +695,7 @@ export default function SecurityPage() {
                               {credential.id}
                             </code>
                           </td>
-                          <td className="p-3 font-mono text-xs">Deploy</td>
+                          <td className="p-3 text-xs">Deploy only</td>
                           <td className="p-3 capitalize">{credential.state}</td>
                           <td className="p-3">
                             {formatOperatorDate(credential.expiresAt)}
@@ -715,8 +753,8 @@ export default function SecurityPage() {
                             colSpan={6}
                             className="p-4 text-content-secondary"
                           >
-                            No deploy credentials. Create one for a trusted
-                            command-line or continuous-integration workflow.
+                            No deploy-only keys. Create one for a trusted
+                            developer or automation workflow.
                           </td>
                         </tr>
                       )}
@@ -726,7 +764,7 @@ export default function SecurityPage() {
                             colSpan={6}
                             className="p-4 text-content-secondary"
                           >
-                            Loading deploy credentials…
+                            Loading deploy-only keys…
                           </td>
                         </tr>
                       )}
@@ -737,87 +775,92 @@ export default function SecurityPage() {
             )}
 
             {visibleCredentialReferences.length > 0 && (
-              <section
+              <Disclosure
+                as="section"
                 className="rounded-lg border bg-background-secondary p-4"
-                aria-labelledby="credential-lifecycle-title"
               >
-                <h4 id="credential-lifecycle-title" className="font-semibold">
-                  Credential lifecycle
-                </h4>
-                <p className="mt-1 max-w-prose text-sm text-content-secondary">
-                  Rotate only configured aliases through host-reviewed provider
-                  adapters. Existing secret values are never returned to this
-                  page.
-                </p>
-                <div className="mt-4 grid gap-3 lg:grid-cols-3">
-                  {visibleCredentialReferences.map((reference) => {
-                    const credential = reference.alias
-                      ? status?.security.credentials.find(
-                          (item) => item.alias === reference.alias,
-                        )
-                      : undefined;
-                    return (
-                      <div
-                        key={reference.label}
-                        className="rounded-md border bg-background-primary p-3"
-                      >
-                        <div className="text-sm font-medium">
-                          {reference.label}
-                        </div>
-                        <div className="mt-1 text-xs text-content-secondary">
-                          {reference.detail}
-                        </div>
-                        <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
-                          <dt className="text-content-secondary">Alias</dt>
-                          <dd className="truncate font-mono text-xs">
-                            {reference.alias ?? "Not configured"}
-                          </dd>
-                          <dt className="text-content-secondary">State</dt>
-                          <dd>{credential?.state ?? "Not inventoried"}</dd>
-                          <dt className="text-content-secondary">
-                            Last rotated
-                          </dt>
-                          <dd>
-                            {credential?.lastRotatedAt
-                              ? formatOperatorDate(credential.lastRotatedAt)
-                              : "No rotation record"}
-                          </dd>
-                          <dt className="text-content-secondary">Due</dt>
-                          <dd>
-                            {credential?.rotationDueAt
-                              ? formatOperatorDate(credential.rotationDueAt)
-                              : "Review required"}
-                          </dd>
-                        </dl>
-                        <Button
-                          className="mt-3"
-                          variant="neutral"
-                          disabled={
-                            changed ||
-                            !reference.alias ||
-                            !operator.metadata?.capabilities.actions[
-                              "rotate-credential"
-                            ]?.enabled
-                          }
-                          onClick={() => {
-                            if (reference.alias)
-                              void prepareRotation(reference.alias);
-                          }}
+                <DisclosureButton className="w-full cursor-pointer text-left font-semibold">
+                  Infrastructure keys
+                </DisclosureButton>
+                <DisclosurePanel>
+                  <p className="mt-1 max-w-prose text-sm text-content-secondary">
+                    These keys connect the dashboard, database, and file
+                    storage. Their values remain securely stored on the server
+                    and are never shown on this page. Replace each key
+                    periodically to limit the impact of an old key being
+                    exposed.
+                  </p>
+                  <div className="mt-4 grid gap-3 lg:grid-cols-3">
+                    {visibleCredentialReferences.map((reference) => {
+                      const credential = reference.alias
+                        ? status?.security.credentials.find(
+                            (item) => item.alias === reference.alias
+                          )
+                        : undefined;
+                      return (
+                        <div
+                          key={reference.label}
+                          className="rounded-md border bg-background-primary p-3"
                         >
-                          Rotate {reference.label.toLowerCase()} credential
-                        </Button>
-                      </div>
-                    );
-                  })}
-                </div>
-                {!evidenceIsCurrent && (
-                  <Callout variant="error">
-                    Credential lifecycle evidence is missing or stale. Rotation
-                    controls may prepare an action, but no credential is current
-                    until the host provider attests it.
-                  </Callout>
-                )}
-              </section>
+                          <div className="text-sm font-medium">
+                            {reference.label}
+                          </div>
+                          <div className="mt-1 text-xs text-content-secondary">
+                            {reference.detail}
+                          </div>
+                          <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
+                            <dt className="text-content-secondary">Status</dt>
+                            <dd>{infrastructureKeyStatus(credential)}</dd>
+                            <dt className="text-content-secondary">
+                              Last replaced
+                            </dt>
+                            <dd>
+                              {credential?.lastRotatedAt
+                                ? formatOperatorDate(credential.lastRotatedAt)
+                                : "Never"}
+                            </dd>
+                            <dt className="text-content-secondary">
+                              Replace by
+                            </dt>
+                            <dd>
+                              {credential?.rotationDueAt
+                                ? formatOperatorDate(credential.rotationDueAt)
+                                : credential?.state === "due" ||
+                                  credential?.state === "overdue"
+                                ? "Now"
+                                : "Not scheduled"}
+                            </dd>
+                          </dl>
+                          <Button
+                            className="mt-3"
+                            variant="neutral"
+                            disabled={
+                              changed ||
+                              !reference.alias ||
+                              !operator.metadata?.capabilities.actions[
+                                "rotate-credential"
+                              ]?.enabled
+                            }
+                            onClick={() => {
+                              if (reference.alias)
+                                void prepareRotation(reference.alias);
+                            }}
+                          >
+                            Replace {reference.label.toLowerCase()}
+                          </Button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {!evidenceIsCurrent && (
+                    <Callout variant="error">
+                      The latest key status is missing or out of date. You can
+                      start a replacement, but wait for a fresh status report
+                      before treating it as complete.
+                    </Callout>
+                  )}
+                </DisclosurePanel>
+              </Disclosure>
             )}
 
             <section
@@ -861,8 +904,8 @@ export default function SecurityPage() {
                     Public administrative endpoints
                   </div>
                   <div className="mt-1 text-content-secondary">
-                    Permanently disallowed by configuration validation. Exposure
-                    probes above verify the deployment consequence.
+                    Disallowed by configuration validation. The observed public
+                    or private result is reported in Security checks above.
                   </div>
                 </div>
               </div>
@@ -946,7 +989,7 @@ function validate(form: SecurityForm | null) {
     form.dashboardSessionTtlSeconds > 3600
   )
     issues.push(
-      "Session TTL must be a whole number from 60 through 3600 seconds.",
+      "Session TTL must be a whole number from 60 through 3600 seconds."
     );
   if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(form.dashboardCredentialRef))
     issues.push("Dashboard credential alias is invalid.");
@@ -959,8 +1002,35 @@ function asError(value: unknown) {
     : new Error("Unknown operator session error");
 }
 
-function probeLabel(value: boolean | null | undefined) {
-  if (value === false) return "Private";
-  if (value === true) return "Publicly reachable";
-  return "Not externally verified";
+function infrastructureKeyStatus(
+  credential: OperatorStatus["security"]["credentials"][number] | undefined
+) {
+  if (!credential || credential.state === "unknown")
+    return "Status unavailable";
+  if (credential.state === "overdue") return "Replacement overdue";
+  if (credential.state === "due")
+    return credential.lastRotatedAt ? "Replace soon" : "Never replaced";
+  return "Up to date";
+}
+
+function PostureRow({
+  label,
+  value,
+  detail,
+  level,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+  level: SignalLevel;
+}) {
+  return (
+    <div className="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+      <div>
+        <div className="text-sm font-medium">{label}</div>
+        <div className="text-xs text-content-secondary">{detail}</div>
+      </div>
+      <HealthSignal level={level} label={value} compact />
+    </div>
+  );
 }

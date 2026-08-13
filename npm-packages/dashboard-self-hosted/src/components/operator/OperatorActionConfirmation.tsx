@@ -1,12 +1,15 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "@ui/Button";
 import { Callout } from "@ui/Callout";
 import {
   ExecutedOperatorAction,
   OperatorApiError,
   PreparedOperatorAction,
+  operatorGet,
   operatorMutation,
 } from "../../lib/operatorApi";
+import { ConfirmationPhrase } from "./ConfirmationPhrase";
+import { trackOperatorAction } from "./OperatorActionTracker";
 
 export function OperatorActionConfirmation({
   prepared,
@@ -20,8 +23,56 @@ export function OperatorActionConfirmation({
   const [confirmation, setConfirmation] = useState("");
   const [executing, setExecuting] = useState(false);
   const [error, setError] = useState<Error | null>(null);
+  const [submitted, setSubmitted] = useState<ExecutedOperatorAction | null>(
+    null,
+  );
+  const acceptedCallback = useRef(onAccepted);
+  acceptedCallback.current = onAccepted;
+
+  useEffect(() => {
+    if (!submitted || submitted.state === "succeeded") return undefined;
+    let active = true;
+    const refresh = async () => {
+      try {
+        const response = await operatorGet<{ action: ExecutedOperatorAction }>(
+          `/v1/actions/${encodeURIComponent(submitted.actionId)}`,
+        );
+        if (!active) return;
+        if (response.action.state === "succeeded") {
+          setExecuting(false);
+          setSubmitted(response.action);
+          acceptedCallback.current(response.action);
+        } else if (response.action.state === "failed") {
+          setExecuting(false);
+          setSubmitted(response.action);
+          setError(
+            new Error(
+              response.action.failure?.message ??
+                "The reviewed operator action failed.",
+            ),
+          );
+        }
+      } catch (requestError) {
+        if (active) {
+          setExecuting(false);
+          setError(
+            requestError instanceof Error
+              ? requestError
+              : new Error("Operator action status is unavailable"),
+          );
+        }
+      }
+    };
+    void refresh();
+    const interval = window.setInterval(() => void refresh(), 1_500);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [submitted]);
 
   async function execute() {
+    let continuesInBackground = false;
     setExecuting(true);
     setError(null);
     try {
@@ -30,7 +81,16 @@ export function OperatorActionConfirmation({
         "POST",
         { token: prepared.token, confirmation },
       );
-      onAccepted(result);
+      if (result.state === "succeeded") {
+        onAccepted(result);
+        setExecuting(false);
+      } else if (result.state === "failed") {
+        throw new Error(result.failure?.message ?? "The operator action failed");
+      } else {
+        trackOperatorAction(result);
+        setSubmitted(result);
+        continuesInBackground = true;
+      }
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -38,7 +98,7 @@ export function OperatorActionConfirmation({
           : new Error("Unknown operator action error"),
       );
     } finally {
-      setExecuting(false);
+      if (!continuesInBackground) setExecuting(false);
     }
   }
 
@@ -82,10 +142,12 @@ export function OperatorActionConfirmation({
           </>
         )}
       </dl>
-      <label className="mt-4 flex max-w-2xl flex-col gap-1 text-sm">
-        <span>
-          Type <code>{prepared.action.confirmation}</code> to continue
-        </span>
+      <ConfirmationPhrase
+        className="mt-4 max-w-2xl"
+        value={prepared.action.confirmation}
+      />
+      <label className="mt-3 flex max-w-2xl flex-col gap-1 text-sm">
+        <span>Paste confirmation text</span>
         <input
           className="min-h-9 rounded-md border bg-background-primary px-3 font-mono text-content-primary"
           value={confirmation}
@@ -108,6 +170,12 @@ export function OperatorActionConfirmation({
             )}
           </div>
         </Callout>
+      )}
+      {executing && submitted && (
+        <p className="mt-3 text-sm text-content-secondary" role="status">
+          Action {submitted.actionId} is {submitted.state}. You can navigate
+          away; progress remains available in the operator action tray.
+        </p>
       )}
       <div className="mt-4 flex flex-wrap gap-2">
         <Button

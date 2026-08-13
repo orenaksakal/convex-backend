@@ -15,7 +15,7 @@ const dotStyles: Record<SignalLevel, string> = {
   healthy: "bg-util-success",
   attention: "bg-util-warning",
   critical: "bg-util-error",
-  unknown: "bg-background-tertiary",
+  unknown: "bg-background-primary",
 };
 
 export function HealthSignal({
@@ -32,19 +32,19 @@ export function HealthSignal({
   return (
     <span
       className={cn(
-        "inline-flex w-fit items-center rounded-full border font-medium",
+        "inline-flex max-w-full items-center rounded-full border font-medium",
         compact
           ? "gap-1.5 px-2 py-0.5 text-[11px]"
           : "gap-2 px-2.5 py-1 text-xs",
         signalStyles[level],
-        className,
+        className
       )}
     >
       <span
-        className={cn("size-2 rounded-full", dotStyles[level])}
+        className={cn("size-2 shrink-0 rounded-full", dotStyles[level])}
         aria-hidden="true"
       />
-      {label}
+      <span className="min-w-0 wrap-break-word">{label}</span>
     </span>
   );
 }
@@ -54,7 +54,7 @@ export function TrafficLightLegend({ className }: { className?: string }) {
     <div
       className={cn(
         "flex flex-wrap gap-x-4 gap-y-2 text-xs text-content-secondary",
-        className,
+        className
       )}
     >
       <span>
@@ -78,8 +78,21 @@ export function TrafficLightLegend({ className }: { className?: string }) {
 }
 
 export function signalForState(value: string | null | undefined): SignalLevel {
-  if (!value) return "critical";
-  const state = value.toLowerCase();
+  if (!value) return "unknown";
+  const state = value.trim().toLowerCase();
+  if (
+    [
+      "",
+      "unknown",
+      "missing",
+      "not reported",
+      "not observed",
+      "evidence unavailable",
+      "probe unavailable",
+    ].includes(state)
+  ) {
+    return "unknown";
+  }
   if (
     [
       "healthy",

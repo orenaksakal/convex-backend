@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
+import {
+  Disclosure,
+  DisclosureButton,
+  DisclosurePanel,
+} from "@headlessui/react";
 import { DeploymentSettingsLayout } from "@common/layouts/DeploymentSettingsLayout";
 import { Button } from "@ui/Button";
 import { Callout } from "@ui/Callout";
 import { OperatorActionConfirmation } from "../../components/operator/OperatorActionConfirmation";
+import { HealthSignal } from "../../components/operator/HealthSignal";
 import {
   EvidenceCard,
   formatOperatorDate,
@@ -12,6 +18,7 @@ import {
   OperatorNumberPresetField,
   operatorInputClasses,
 } from "../../components/operator/OperatorPagePrimitives";
+import { alertPolicyPresentation } from "../../components/operator/TruthfulEvidence";
 import { useOperatorState } from "../../components/operator/useOperatorState";
 import {
   AlertDestinations,
@@ -46,7 +53,7 @@ export default function AlertsPage() {
   const [accepted, setAccepted] = useState<ExecutedOperatorAction | null>(null);
   const [actionError, setActionError] = useState<Error | null>(null);
   const [destinations, setDestinations] = useState<AlertDestinations | null>(
-    null,
+    null
   );
   const [destinationForm, setDestinationForm] =
     useState<DestinationForm | null>(null);
@@ -59,7 +66,7 @@ export default function AlertsPage() {
   useEffect(() => {
     if (!operator.metadata?.capabilities.alertDestinations.read) return;
     void operatorGet<{ destinations: AlertDestinations }>(
-      "/v1/alert-destinations",
+      "/v1/alert-destinations"
     )
       .then(({ destinations: next }) => {
         setDestinations(next);
@@ -114,7 +121,7 @@ export default function AlertsPage() {
           instanceId: configuration.instance.id,
           baseRevision: configuration.revision,
           parameters: {},
-        },
+        }
       );
       setPrepared(next);
     } catch (requestError) {
@@ -147,10 +154,11 @@ export default function AlertsPage() {
 
   const status = operator.status;
   const alertState = !status
-    ? "Unavailable"
+    ? "Unknown"
     : status.freshness.state === "stale"
-      ? "Stale"
-      : status.alerts.state;
+    ? "Unknown"
+    : status.alerts.state;
+  const alertPolicy = form ? alertPolicyPresentation(form, destinations) : null;
 
   return (
     <DeploymentSettingsLayout page="alerts">
@@ -187,89 +195,88 @@ export default function AlertsPage() {
           !operator.loading && (
             <>
               <section
-                className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6"
+                className="grid min-w-0 gap-3 md:grid-cols-3"
                 aria-label="Alert evidence"
               >
                 <EvidenceCard
-                  label="Alert state"
+                  label="Alert delivery"
                   value={alertState}
                   detail={
-                    status
-                      ? `Evidence generated ${formatOperatorDate(status.generatedAt)}`
-                      : "No validated status provider"
+                    !status
+                      ? "No validated alert status is available"
+                      : status.freshness.state === "stale"
+                      ? `Alert status evidence is ${status.freshness.ageSeconds} seconds old`
+                      : destinations?.configured
+                      ? status?.alerts.lastDeliveryAt
+                        ? `Last delivered ${formatOperatorDate(
+                            status.alerts.lastDeliveryAt
+                          )}`
+                        : "Destination configured; no incident delivery yet"
+                      : "No email or Telegram destination configured"
                   }
-                  warning={alertState !== "ok" && alertState !== "disabled"}
+                  warning={
+                    alertState === "firing" ||
+                    alertState === "delivery_failed" ||
+                    (form.enabled && !destinations?.configured)
+                  }
                 />
                 <EvidenceCard
-                  label="Last delivery"
-                  value={formatOperatorDate(status?.alerts.lastDeliveryAt)}
-                  detail={
-                    status?.alerts.lastDeliveryAt
-                      ? "Validated notifier evidence"
-                      : "No delivery evidence"
-                  }
-                  warning={!status?.alerts.lastDeliveryAt && form.enabled}
-                />
-                <EvidenceCard
-                  label="Destination"
-                  value={
-                    destinations?.configured
-                      ? "Email + Telegram"
-                      : "Not configured"
-                  }
-                  detail="Secrets remain on the private operator host"
-                  warning={form.enabled && !destinations?.configured}
-                />
-                <EvidenceCard
-                  label="Container"
+                  label="Infrastructure"
                   value={
                     status?.alerts.metrics
-                      ? `${status.alerts.metrics.container.status}/${status.alerts.metrics.container.health}`
+                      ? status.alerts.metrics.container.running &&
+                        status.alerts.metrics.container.health !==
+                          "unhealthy" &&
+                        status.alerts.metrics.providers.database ===
+                          "healthy" &&
+                        status.alerts.metrics.providers.objectStorage ===
+                          "healthy"
+                        ? "Healthy"
+                        : "Needs attention"
                       : "Evidence unavailable"
                   }
                   detail={
                     status?.alerts.metrics
-                      ? `${status.alerts.metrics.container.restartCount} restarts · out of memory (OOM) ${status.alerts.metrics.container.oomKilled ? "yes" : "no"}`
-                      : "No container evidence"
+                      ? `${status.alerts.metrics.container.restartCount} restarts · database ${status.alerts.metrics.providers.database} · storage ${status.alerts.metrics.providers.objectStorage}`
+                      : "Runtime and provider evidence is unavailable"
                   }
                   warning={
                     !status?.alerts.metrics ||
-                    status.alerts.metrics.container.health === "unhealthy"
+                    !status.alerts.metrics.container.running ||
+                    status.alerts.metrics.container.health === "unhealthy" ||
+                    status.alerts.metrics.providers.database ===
+                      "unavailable" ||
+                    status.alerts.metrics.providers.objectStorage ===
+                      "unavailable"
                   }
                 />
                 <EvidenceCard
-                  label="Function failures"
+                  label="Function runs"
                   value={
                     status?.alerts.metrics
-                      ? String(status.alerts.metrics.convex.functionFailures)
-                      : "Evidence unavailable"
-                  }
-                  detail={`${form.lookbackMinutes} minute lookback · warning ${form.functionFailureWarningCount} · critical ${form.functionFailureCriticalCount}`}
-                  warning={
-                    (status?.alerts.metrics?.convex.functionFailures ?? 0) >=
-                    form.functionFailureWarningCount
-                  }
-                />
-                <EvidenceCard
-                  label="Convex pressure"
-                  value={
-                    status?.alerts.metrics
-                      ? String(
-                          status.alerts.metrics.convex.permanentOccFailures +
-                            status.alerts.metrics.convex.resourceLimitFailures,
-                        )
-                      : "Evidence unavailable"
+                      ? `${status.alerts.metrics.convex.functionFailures.toLocaleString()} of ${status.alerts.metrics.convex.completionCount.toLocaleString()} completed function runs failed`
+                      : "Activity unavailable"
                   }
                   detail={
                     status?.alerts.metrics
-                      ? `${status.alerts.metrics.convex.permanentOccFailures} permanent optimistic concurrency control (OCC) · ${status.alerts.metrics.convex.resourceLimitFailures} read-limit failures`
-                      : "No execution evidence"
+                      ? `Last ${
+                          form.lookbackMinutes
+                        } minutes · ${failureCauseLabel(
+                          status.alerts.metrics.convex.permanentOccFailures,
+                          "repeated database write conflicts"
+                        )} · ${failureCauseLabel(
+                          status.alerts.metrics.convex.resourceLimitFailures,
+                          "reading too much data"
+                        )}`
+                      : "Could not check recent function runs"
                   }
                   warning={
-                    (status?.alerts.metrics?.convex.permanentOccFailures ?? 0) >
-                      0 ||
+                    (status?.alerts.metrics?.convex.functionFailures ?? 0) >=
+                      form.functionFailureWarningCount ||
+                    (status?.alerts.metrics?.convex.permanentOccFailures ??
+                      0) >= form.permanentOccWarningCount ||
                     (status?.alerts.metrics?.convex.resourceLimitFailures ??
-                      0) > 0
+                      0) >= form.resourceLimitWarningCount
                   }
                 />
               </section>
@@ -286,220 +293,240 @@ export default function AlertsPage() {
               )}
 
               {destinationForm && (
-                <section
+                <Disclosure
+                  as="section"
                   className="rounded-lg border bg-background-secondary p-4"
-                  aria-labelledby="alert-destinations-title"
                 >
-                  <h4 id="alert-destinations-title" className="font-semibold">
-                    Email and Telegram delivery
-                  </h4>
-                  <p className="mt-1 text-sm text-content-secondary">
-                    Saving replaces supplied secrets; blank password or URL
-                    fields preserve an existing secret. Secret values are never
-                    returned to this page.
-                  </p>
-                  <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                    <label className="flex items-center gap-2 text-sm sm:col-span-2">
-                      <input
-                        type="checkbox"
-                        checked={destinationForm.email.enabled}
-                        onChange={(event) =>
+                  <DisclosureButton className="w-full cursor-pointer text-left font-semibold">
+                    Advanced delivery settings
+                  </DisclosureButton>
+                  <DisclosurePanel>
+                    <p className="mt-1 text-sm text-content-secondary">
+                      Alert delivery is managed automatically when credentials
+                      are available. Open this only to add SMTP credentials,
+                      change the recipient, or replace the write-only Shoutrr
+                      destination. Blank secret fields preserve existing values.
+                    </p>
+                    <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                      <label className="flex items-center gap-2 text-sm sm:col-span-2">
+                        <input
+                          type="checkbox"
+                          checked={destinationForm.email.enabled}
+                          onChange={(event) =>
+                            setDestinationForm({
+                              ...destinationForm,
+                              email: {
+                                ...destinationForm.email,
+                                enabled: event.target.checked,
+                              },
+                            })
+                          }
+                        />
+                        Enable email delivery
+                      </label>
+                      <OperatorField
+                        label="SMTP mail-server host"
+                        description="Hostname of the server that sends alert email using Simple Mail Transfer Protocol (SMTP)."
+                      >
+                        <input
+                          className={operatorInputClasses}
+                          value={destinationForm.email.host}
+                          onChange={(event) =>
+                            setDestinationForm({
+                              ...destinationForm,
+                              email: {
+                                ...destinationForm.email,
+                                host: event.target.value,
+                              },
+                            })
+                          }
+                        />
+                      </OperatorField>
+                      <OperatorNumberPresetField
+                        label="SMTP mail-server port"
+                        description="Choose the transport expected by your mail provider. The secure toggle must match."
+                        value={destinationForm.email.port}
+                        presets={SMTP_PORT_PRESETS}
+                        min={1}
+                        max={65535}
+                        onChange={(port) =>
+                          port !== null &&
                           setDestinationForm({
                             ...destinationForm,
-                            email: {
-                              ...destinationForm.email,
-                              enabled: event.target.checked,
-                            },
+                            email: { ...destinationForm.email, port },
                           })
                         }
                       />
-                      Enable email delivery
-                    </label>
-                    <OperatorField
-                      label="SMTP mail-server host"
-                      description="Hostname of the server that sends alert email using Simple Mail Transfer Protocol (SMTP)."
-                    >
-                      <input
-                        className={operatorInputClasses}
-                        value={destinationForm.email.host}
-                        onChange={(event) =>
-                          setDestinationForm({
-                            ...destinationForm,
-                            email: {
-                              ...destinationForm.email,
-                              host: event.target.value,
-                            },
-                          })
+                      <OperatorField
+                        label="SMTP username"
+                        description="Account identity used to authenticate to the outgoing mail server."
+                      >
+                        <input
+                          className={operatorInputClasses}
+                          autoComplete="username"
+                          value={destinationForm.email.username}
+                          onChange={(event) =>
+                            setDestinationForm({
+                              ...destinationForm,
+                              email: {
+                                ...destinationForm.email,
+                                username: event.target.value,
+                              },
+                            })
+                          }
+                        />
+                      </OperatorField>
+                      <OperatorField
+                        label="SMTP password"
+                        description={
+                          destinations?.email.passwordConfigured
+                            ? "A password is configured. Leave this write-only field blank to keep the existing password."
+                            : "Write-only password used to authenticate to the outgoing mail server."
                         }
-                      />
-                    </OperatorField>
-                    <OperatorNumberPresetField
-                      label="SMTP mail-server port"
-                      description="Choose the transport expected by your mail provider. The secure toggle must match."
-                      value={destinationForm.email.port}
-                      presets={SMTP_PORT_PRESETS}
-                      min={1}
-                      max={65535}
-                      onChange={(port) =>
-                        port !== null &&
-                        setDestinationForm({
-                          ...destinationForm,
-                          email: { ...destinationForm.email, port },
-                        })
-                      }
-                    />
-                    <OperatorField
-                      label="SMTP username"
-                      description="Account identity used to authenticate to the outgoing mail server."
-                    >
-                      <input
-                        className={operatorInputClasses}
-                        autoComplete="username"
-                        value={destinationForm.email.username}
-                        onChange={(event) =>
-                          setDestinationForm({
-                            ...destinationForm,
-                            email: {
-                              ...destinationForm.email,
-                              username: event.target.value,
-                            },
-                          })
+                      >
+                        <input
+                          className={operatorInputClasses}
+                          type="password"
+                          autoComplete="new-password"
+                          value={destinationForm.email.password}
+                          onChange={(event) =>
+                            setDestinationForm({
+                              ...destinationForm,
+                              email: {
+                                ...destinationForm.email,
+                                password: event.target.value,
+                              },
+                            })
+                          }
+                        />
+                      </OperatorField>
+                      <OperatorField
+                        label="From address"
+                        description="Envelope and message sender"
+                      >
+                        <input
+                          className={operatorInputClasses}
+                          type="email"
+                          value={destinationForm.email.from}
+                          onChange={(event) =>
+                            setDestinationForm({
+                              ...destinationForm,
+                              email: {
+                                ...destinationForm.email,
+                                from: event.target.value,
+                              },
+                            })
+                          }
+                        />
+                      </OperatorField>
+                      <OperatorField
+                        label="Recipient address"
+                        description="Operator alert recipient"
+                      >
+                        <input
+                          className={operatorInputClasses}
+                          type="email"
+                          value={destinationForm.email.to}
+                          onChange={(event) =>
+                            setDestinationForm({
+                              ...destinationForm,
+                              email: {
+                                ...destinationForm.email,
+                                to: event.target.value,
+                              },
+                            })
+                          }
+                        />
+                      </OperatorField>
+                      <div className="flex items-start gap-2 text-sm sm:col-span-2">
+                        <input
+                          id="email-immediate-encryption"
+                          className="mt-1"
+                          type="checkbox"
+                          aria-describedby="email-immediate-encryption-help"
+                          checked={destinationForm.email.secure}
+                          onChange={(event) =>
+                            setDestinationForm({
+                              ...destinationForm,
+                              email: {
+                                ...destinationForm.email,
+                                secure: event.target.checked,
+                              },
+                            })
+                          }
+                        />
+                        <span>
+                          <label
+                            className="block font-medium"
+                            htmlFor="email-immediate-encryption"
+                          >
+                            Use immediate encryption (usually port 465)
+                          </label>
+                          <span
+                            id="email-immediate-encryption-help"
+                            className="mt-0.5 block text-xs text-content-secondary"
+                          >
+                            Turn this on only when your email provider specifies
+                            SSL/TLS or port 465. Leave it off for port 587; port
+                            587 is still encrypted automatically.
+                          </span>
+                        </span>
+                      </div>
+                      <label className="flex items-center gap-2 text-sm sm:col-span-2">
+                        <input
+                          type="checkbox"
+                          checked={destinationForm.telegram.enabled}
+                          onChange={(event) =>
+                            setDestinationForm({
+                              ...destinationForm,
+                              telegram: {
+                                ...destinationForm.telegram,
+                                enabled: event.target.checked,
+                              },
+                            })
+                          }
+                        />
+                        Enable Telegram delivery
+                      </label>
+                      <OperatorField
+                        label="Telegram Shoutrr URL"
+                        description={
+                          destinations?.telegram.shoutrrUrlConfigured
+                            ? "A destination is configured. Leave this write-only field blank to keep it."
+                            : "A Shoutrr connection URL containing the Telegram bot token and target chat, for example telegram://token@telegram?chats=…. It is stored only on the operator host."
                         }
-                      />
-                    </OperatorField>
-                    <OperatorField
-                      label="SMTP password"
-                      description={
-                        destinations?.email.passwordConfigured
-                          ? "A password is configured. Leave this write-only field blank to keep the existing password."
-                          : "Write-only password used to authenticate to the outgoing mail server."
-                      }
-                    >
-                      <input
-                        className={operatorInputClasses}
-                        type="password"
-                        autoComplete="new-password"
-                        value={destinationForm.email.password}
-                        onChange={(event) =>
-                          setDestinationForm({
-                            ...destinationForm,
-                            email: {
-                              ...destinationForm.email,
-                              password: event.target.value,
-                            },
-                          })
+                      >
+                        <input
+                          className={operatorInputClasses}
+                          type="password"
+                          autoComplete="off"
+                          value={destinationForm.telegram.shoutrrUrl}
+                          onChange={(event) =>
+                            setDestinationForm({
+                              ...destinationForm,
+                              telegram: {
+                                ...destinationForm.telegram,
+                                shoutrrUrl: event.target.value,
+                              },
+                            })
+                          }
+                        />
+                      </OperatorField>
+                    </div>
+                    <div className="mt-4">
+                      <Button
+                        loading={savingDestinations}
+                        disabled={
+                          !operator.metadata.capabilities.alertDestinations
+                            .write
                         }
-                      />
-                    </OperatorField>
-                    <OperatorField
-                      label="From address"
-                      description="Envelope and message sender"
-                    >
-                      <input
-                        className={operatorInputClasses}
-                        type="email"
-                        value={destinationForm.email.from}
-                        onChange={(event) =>
-                          setDestinationForm({
-                            ...destinationForm,
-                            email: {
-                              ...destinationForm.email,
-                              from: event.target.value,
-                            },
-                          })
-                        }
-                      />
-                    </OperatorField>
-                    <OperatorField
-                      label="Recipient address"
-                      description="Operator alert recipient"
-                    >
-                      <input
-                        className={operatorInputClasses}
-                        type="email"
-                        value={destinationForm.email.to}
-                        onChange={(event) =>
-                          setDestinationForm({
-                            ...destinationForm,
-                            email: {
-                              ...destinationForm.email,
-                              to: event.target.value,
-                            },
-                          })
-                        }
-                      />
-                    </OperatorField>
-                    <label className="flex items-center gap-2 text-sm sm:col-span-2">
-                      <input
-                        type="checkbox"
-                        checked={destinationForm.email.secure}
-                        onChange={(event) =>
-                          setDestinationForm({
-                            ...destinationForm,
-                            email: {
-                              ...destinationForm.email,
-                              secure: event.target.checked,
-                            },
-                          })
-                        }
-                      />
-                      Start with Transport Layer Security (TLS) encryption
-                      immediately—normally port 465. Leave off for STARTTLS,
-                      which upgrades a port 587 connection after it starts.
-                    </label>
-                    <label className="flex items-center gap-2 text-sm sm:col-span-2">
-                      <input
-                        type="checkbox"
-                        checked={destinationForm.telegram.enabled}
-                        onChange={(event) =>
-                          setDestinationForm({
-                            ...destinationForm,
-                            telegram: {
-                              ...destinationForm.telegram,
-                              enabled: event.target.checked,
-                            },
-                          })
-                        }
-                      />
-                      Enable Telegram delivery
-                    </label>
-                    <OperatorField
-                      label="Telegram Shoutrr URL"
-                      description={
-                        destinations?.telegram.shoutrrUrlConfigured
-                          ? "A destination is configured. Leave this write-only field blank to keep it."
-                          : "A Shoutrr connection URL containing the Telegram bot token and target chat, for example telegram://token@telegram?chats=…. It is stored only on the operator host."
-                      }
-                    >
-                      <input
-                        className={operatorInputClasses}
-                        type="password"
-                        autoComplete="off"
-                        value={destinationForm.telegram.shoutrrUrl}
-                        onChange={(event) =>
-                          setDestinationForm({
-                            ...destinationForm,
-                            telegram: {
-                              ...destinationForm.telegram,
-                              shoutrrUrl: event.target.value,
-                            },
-                          })
-                        }
-                      />
-                    </OperatorField>
-                  </div>
-                  <div className="mt-4">
-                    <Button
-                      loading={savingDestinations}
-                      disabled={
-                        !operator.metadata.capabilities.alertDestinations.write
-                      }
-                      onClick={() => void saveDestinations()}
-                    >
-                      Save destinations
-                    </Button>
-                  </div>
-                </section>
+                        onClick={() => void saveDestinations()}
+                      >
+                        Save destinations
+                      </Button>
+                    </div>
+                  </DisclosurePanel>
+                </Disclosure>
               )}
 
               <section
@@ -507,23 +534,23 @@ export default function AlertsPage() {
                 aria-labelledby="alert-policy-title"
               >
                 <h4 id="alert-policy-title" className="font-semibold">
-                  Alert policy
+                  Alert sensitivity
                 </h4>
                 <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                  <label className="flex items-center gap-2 text-sm sm:col-span-2">
-                    <input
-                      type="checkbox"
-                      checked={form.enabled}
-                      onChange={(event) =>
-                        setForm({
-                          ...form,
-                          enabled: event.target.checked,
-                          destinationAlias: "email-telegram",
-                        })
-                      }
-                    />
-                    Enable alert delivery for this instance
-                  </label>
+                  <div className="flex items-center gap-3 rounded-md border bg-background-primary p-3 text-sm sm:col-span-2">
+                    {alertPolicy && (
+                      <>
+                        <HealthSignal
+                          level={alertPolicy.level}
+                          label={alertPolicy.label}
+                          compact
+                        />
+                        <span className="text-content-secondary">
+                          {alertPolicy.detail}
+                        </span>
+                      </>
+                    )}
+                  </div>
                   <Threshold
                     label="Measurement window, minutes"
                     description="Each alert evaluation counts matching events from this many recent minutes. A longer window is less sensitive to brief spikes but takes longer to clear."
@@ -728,6 +755,13 @@ export default function AlertsPage() {
   );
 }
 
+function failureCauseLabel(count: number, cause: string) {
+  if (count === 0) return `No failures from ${cause}`;
+  return `${count.toLocaleString()} failure${
+    count === 1 ? "" : "s"
+  } from ${cause}`;
+}
+
 function Threshold({
   label,
   description,
@@ -755,7 +789,7 @@ function Threshold({
         (preset) =>
           typeof preset.value === "number" &&
           preset.value >= min &&
-          preset.value <= max,
+          preset.value <= max
       )}
       min={min}
       max={max}
@@ -766,20 +800,20 @@ function Threshold({
 
 const SMTP_PORT_PRESETS = [
   {
-    label: "587 · STARTTLS (recommended)",
+    label: "587 · Standard secure email (recommended)",
     value: 587,
     description:
-      "The standard authenticated submission port; keep implicit TLS off.",
+      "Encryption starts automatically after connecting. Leave immediate encryption off.",
   },
   {
-    label: "465 · implicit TLS",
+    label: "465 · Immediate encryption",
     value: 465,
-    description: "TLS starts immediately; enable the secure transport toggle.",
+    description: "Turn on immediate encryption when using this port.",
   },
   {
-    label: "2525 · alternate submission",
+    label: "2525 · Alternative email port",
     value: 2525,
-    description: "Common provider fallback when port 587 is unavailable.",
+    description: "Use only when your email provider recommends it.",
   },
 ];
 

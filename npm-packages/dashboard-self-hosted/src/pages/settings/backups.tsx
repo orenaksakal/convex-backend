@@ -1,12 +1,16 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { DeploymentSettingsLayout } from "@common/layouts/DeploymentSettingsLayout";
 import { Button } from "@ui/Button";
 import { Callout } from "@ui/Callout";
+import { HealthSignal } from "../../components/operator/HealthSignal";
 import { OperatorActionConfirmation } from "../../components/operator/OperatorActionConfirmation";
+import { OperatorResourceFreshness } from "../../components/operator/OperatorResourceFreshness";
+import { useOperatorResource } from "../../components/operator/useOperatorResource";
 import {
   OperatorNumberPresetField,
   OperatorTextPresetField,
 } from "../../components/operator/OperatorPagePrimitives";
+import { backupSchedulePresentation } from "../../components/operator/TruthfulEvidence";
 import {
   ExecutedOperatorAction,
   OperatorApiError,
@@ -17,6 +21,7 @@ import {
   operatorGet,
   operatorMutation,
 } from "../../lib/operatorApi";
+import { SnapshotTools } from "./snapshots";
 
 type BackupForm = OperatorConfiguration["backup"];
 
@@ -26,7 +31,6 @@ export default function BackupsPage() {
   const [metadata, setMetadata] = useState<OperatorMetadata | null>(null);
   const [status, setStatus] = useState<OperatorStatus | null>(null);
   const [form, setForm] = useState<BackupForm | null>(null);
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const [error, setError] = useState<Error | null>(null);
@@ -34,46 +38,46 @@ export default function BackupsPage() {
   const [accepted, setAccepted] = useState<ExecutedOperatorAction | null>(null);
   const [targetInstanceId, setTargetInstanceId] = useState("");
   const [archiveId, setArchiveId] = useState("");
+  const formDirtyRef = useRef(false);
 
   const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const [configurationResponse, nextMetadata] = await Promise.all([
-        operatorGet<{ configuration: OperatorConfiguration }>(
-          "/v1/configuration",
-        ),
-        operatorGet<OperatorMetadata>("/v1/metadata"),
-      ]);
-      const nextStatus = nextMetadata.capabilities.status.read
-        ? await operatorGet<{ status: OperatorStatus }>("/v1/status").then(
-            (response) => response.status,
-          )
-        : null;
-      setConfiguration(configurationResponse.configuration);
+    const [configurationResponse, nextMetadata] = await Promise.all([
+      operatorGet<{ configuration: OperatorConfiguration }>(
+        "/v1/configuration",
+      ),
+      operatorGet<OperatorMetadata>("/v1/metadata"),
+    ]);
+    const nextStatus = nextMetadata.capabilities.status.read
+      ? await operatorGet<{ status: OperatorStatus }>("/v1/status").then(
+          (response) => response.status,
+        )
+      : null;
+    setConfiguration(configurationResponse.configuration);
+    if (!formDirtyRef.current) {
       setForm(configurationResponse.configuration.backup);
-      setMetadata(nextMetadata);
-      setStatus(nextStatus);
-      setArchiveId(nextStatus?.backups.archives[0]?.id ?? "");
-    } catch (requestError) {
-      setError(asError(requestError));
-    } finally {
-      setLoading(false);
     }
+    setMetadata(nextMetadata);
+    setStatus(nextStatus);
+    setArchiveId((current) =>
+      nextStatus?.backups.archives.some((archive) => archive.id === current)
+        ? current
+        : (nextStatus?.backups.archives[0]?.id ?? ""),
+    );
   }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
+  const resource = useOperatorResource(load);
 
   const changed =
     configuration !== null &&
     form !== null &&
     JSON.stringify(configuration.backup) !== JSON.stringify(form);
+  formDirtyRef.current = changed;
   const issues = useMemo(() => validateForm(form), [form]);
   const selectedArchive = status?.backups.archives.find(
     (archive) => archive.id === archiveId,
   );
+  const backupSchedule = configuration
+    ? backupSchedulePresentation(configuration.backup, status)
+    : null;
 
   async function save() {
     if (!configuration || !form || issues.length > 0) return;
@@ -86,7 +90,7 @@ export default function BackupsPage() {
         restartRequired: boolean;
       }>("/v1/configuration", "PATCH", {
         baseRevision: configuration.revision,
-        changes: { backup: form },
+        changes: { backup: normalizeBackupPolicy(form) },
       });
       setConfiguration(result.current);
       setForm(result.current.backup);
@@ -95,7 +99,7 @@ export default function BackupsPage() {
       const nextError = asError(requestError);
       setError(nextError);
       if (nextError instanceof OperatorApiError && nextError.status === 409) {
-        await load();
+        await resource.refresh();
       }
     } finally {
       setSaving(false);
@@ -129,22 +133,34 @@ export default function BackupsPage() {
   return (
     <DeploymentSettingsLayout page="backups">
       <div className="flex flex-col gap-6">
-        <header>
-          <h3 className="font-semibold">Backup and restore</h3>
-          <p className="mt-1 max-w-prose text-sm text-content-secondary">
-            Configure storage-inclusive logical backups and restore only into a
-            new private deployment. Existing deployments are never overwritten
-            from this page.
-          </p>
+        <header className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="font-semibold">Data protection</h3>
+            <p className="mt-1 max-w-prose text-sm text-content-secondary">
+              Configure automatic backups, retention, restores, imports, and
+              exports from one page. Saved policy and current scheduler evidence
+              are shown separately.
+            </p>
+          </div>
+          <OperatorResourceFreshness
+            label="Backup evidence"
+            lastUpdatedAt={resource.lastUpdatedAt}
+            refreshing={resource.refreshing}
+            error={resource.error}
+            onRefresh={resource.refresh}
+          />
         </header>
 
-        {loading && (
+        {resource.loading && (
           <Panel
             title="Loading backup evidence"
             detail="Waiting for configuration, archive, and restore-drill status."
           />
         )}
-        {error && <ErrorCallout error={error} onRetry={load} />}
+        {resource.error && (
+          <ErrorCallout error={resource.error} onRetry={resource.refresh} />
+        )}
+        {error && <ErrorCallout error={error} onRetry={resource.refresh} />}
         {accepted && (
           <Callout variant="success">
             <div>
@@ -154,7 +170,7 @@ export default function BackupsPage() {
           </Callout>
         )}
 
-        {configuration && form && metadata && !loading && (
+        {configuration && form && metadata && !resource.loading && (
           <>
             <BackupEvidence configuration={configuration} status={status} />
 
@@ -163,40 +179,42 @@ export default function BackupsPage() {
               aria-labelledby="backup-policy-title"
             >
               <h4 id="backup-policy-title" className="font-semibold">
-                Backup policy
+                Automatic backup policy
               </h4>
               <p className="mt-1 text-sm text-content-secondary">
-                The fleet manager assigns a protected R2 destination to this
-                deployment. The dashboard stores only its safe alias, never
-                Cloudflare credentials or shared bucket details.
+                Fleet-managed deployments can receive a daily UTC default. This
+                section reports the actual saved policy; provider and credential
+                choices stay managed.
               </p>
               <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                <label className="flex items-center gap-2 text-sm sm:col-span-2">
-                  <input
-                    type="checkbox"
-                    checked={form.enabled}
-                    onChange={(event) =>
-                      setForm({
-                        ...form,
-                        enabled: event.target.checked,
-                        schedule:
-                          event.target.checked && form.schedule === null
-                            ? "0 2 * * *"
-                            : form.schedule,
-                      })
-                    }
-                  />
-                  Schedule automatic backups
-                </label>
+                <div className="flex items-center gap-3 rounded-md border bg-background-primary p-3 text-sm sm:col-span-2">
+                  {backupSchedule && (
+                    <>
+                      <HealthSignal
+                        level={backupSchedule.level}
+                        label={backupSchedule.label}
+                        compact
+                      />
+                      <span className="text-content-secondary">
+                        {backupSchedule.detail}
+                      </span>
+                    </>
+                  )}
+                </div>
                 <OperatorTextPresetField
                   label="Schedule"
                   description="Choose a common UTC schedule or enter a five-field cron expression."
                   value={form.schedule}
                   presets={BACKUP_SCHEDULE_PRESETS}
-                  onChange={(schedule) => setForm({ ...form, schedule })}
+                  onChange={(schedule) =>
+                    setForm({
+                      ...form,
+                      schedule,
+                      rpoHours: backupIntervalHours(schedule) ?? form.rpoHours,
+                    })
+                  }
                   customLabel="Custom cron expression"
                   placeholder="0 2 * * *"
-                  disabled={!form.enabled}
                 />
                 <Field
                   label="Backup destination"
@@ -222,26 +240,6 @@ export default function BackupsPage() {
                     setForm({ ...form, retentionDays })
                   }
                 />
-                <OperatorNumberPresetField
-                  label="Recovery Point Objective (RPO), hours"
-                  description="Target maximum age of the newest successful backup. For example, 24 hours means the recovery plan accepts up to roughly 24 hours of data changes being absent from the restored backup."
-                  value={form.rpoHours}
-                  presets={RPO_PRESETS}
-                  min={1}
-                  onChange={(rpoHours) =>
-                    rpoHours !== null && setForm({ ...form, rpoHours })
-                  }
-                />
-                <OperatorNumberPresetField
-                  label="Recovery Time Objective (RTO), hours"
-                  description="Target maximum time to restore service from a verified backup. This records and displays the target; it does not guarantee or automate completion within that time."
-                  value={form.rtoHours}
-                  presets={RTO_PRESETS}
-                  min={1}
-                  onChange={(rtoHours) =>
-                    rtoHours !== null && setForm({ ...form, rtoHours })
-                  }
-                />
               </div>
               {issues.length > 0 && (
                 <Callout variant="error">
@@ -260,9 +258,20 @@ export default function BackupsPage() {
                     revision {configuration.revision}. This updates scheduler
                     policy without running a backup or restore.
                   </div>
-                  <pre className="mt-3 scrollbar overflow-auto rounded-sm bg-background-tertiary p-3 text-xs">
-                    {JSON.stringify(form, null, 2)}
-                  </pre>
+                  <dl className="mt-3 grid gap-3 rounded-sm bg-background-tertiary p-3 sm:grid-cols-2">
+                    <div>
+                      <dt className="text-xs text-content-secondary">
+                        Schedule
+                      </dt>
+                      <dd className="mt-1 font-mono">{form.schedule}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-content-secondary">
+                        Retention
+                      </dt>
+                      <dd className="mt-1">{form.retentionDays} days</dd>
+                    </div>
+                  </dl>
                   <div className="mt-3 flex gap-2">
                     <Button onClick={() => void save()} loading={saving}>
                       Apply reviewed policy
@@ -308,8 +317,8 @@ export default function BackupsPage() {
                 <div className="rounded-md border bg-background-primary p-3">
                   <div className="font-medium">Create backup now</div>
                   <p className="mt-1 text-sm text-content-secondary">
-                    Create a storage-inclusive recovery point using the
-                    configured destination alias.
+                    Create a verified backup containing PostgreSQL data and R2
+                    objects.
                   </p>
                   <Button
                     className="mt-3"
@@ -404,26 +413,40 @@ export default function BackupsPage() {
             )}
           </>
         )}
+
+        <SnapshotTools />
       </div>
     </DeploymentSettingsLayout>
   );
 }
 
 function actionResultTitle(action: ExecutedOperatorAction) {
-  return action.kind === "manual-backup" && action.result.accepted === true
+  return action.kind === "manual-backup" && action.result?.accepted === true
     ? "Backup completed and verified."
     : `${action.kind} completed.`;
 }
 
 function actionResultDetail(action: ExecutedOperatorAction) {
-  if (action.kind === "manual-backup" && action.result.accepted === true) {
-    const archiveId = typeof action.result.archiveId === "string" ? action.result.archiveId : null;
-    const sizeBytes = typeof action.result.sizeBytes === "number" ? action.result.sizeBytes : null;
+  if (action.kind === "manual-backup" && action.result?.accepted === true) {
+    const archiveId =
+      typeof action.result?.archiveId === "string"
+        ? action.result.archiveId
+        : null;
+    const sizeBytes =
+      typeof action.result?.sizeBytes === "number"
+        ? action.result.sizeBytes
+        : null;
     return (
       <>
         Action <code>{action.actionId}</code>
-        {archiveId ? <> created archive <code>{archiveId}</code></> : null}
-        {sizeBytes === null ? null : <> ({formatBytes(sizeBytes)})</>}. Backup evidence was refreshed.
+        {archiveId ? (
+          <>
+            {" "}
+            created archive <code>{archiveId}</code>
+          </>
+        ) : null}
+        {sizeBytes === null ? null : <> ({formatBytes(sizeBytes)})</>}. Backup
+        evidence was refreshed.
       </>
     );
   }
@@ -448,12 +471,6 @@ function BackupEvidence({
     : status.freshness.state === "stale"
       ? "Stale"
       : "Current";
-  const rpoState =
-    last &&
-    Date.now() - Date.parse(last.completedAt) <=
-      configuration.backup.rpoHours * 3600_000
-      ? "Within recovery-point target"
-      : "Outside configured retention or not reported";
   const scheduler = status?.backups.scheduler;
   return (
     <section
@@ -475,16 +492,12 @@ function BackupEvidence({
         value={last?.verified ? last.id : "No verified backup"}
         detail={
           last
-            ? `${new Date(last.completedAt).toLocaleString()} · ${formatBytes(last.sizeBytes)}`
+            ? `${new Date(last.completedAt).toLocaleString()} · ${formatBytes(
+                last.sizeBytes,
+              )}`
             : "No archive evidence"
         }
         warning={!last?.verified}
-      />
-      <Evidence
-        label="Recovery point"
-        value={rpoState}
-        detail={`Recovery Point Objective (RPO): ${configuration.backup.rpoHours} hours`}
-        warning={rpoState !== "Within recovery-point target"}
       />
       <Evidence
         label="Restore drill"
@@ -505,7 +518,13 @@ function BackupEvidence({
         }
         detail={
           scheduler?.lastEvaluatedAt
-            ? `Revision ${scheduler.configurationRevision ?? "not reported"} · checked ${new Date(scheduler.lastEvaluatedAt).toLocaleString()}${scheduler.lastError ? ` · ${scheduler.lastError}` : ""}`
+            ? `Revision ${
+                scheduler.configurationRevision ?? "not reported"
+              } · checked ${new Date(
+                scheduler.lastEvaluatedAt,
+              ).toLocaleString()}${
+                scheduler.lastError ? ` · ${scheduler.lastError}` : ""
+              }`
             : "No scheduler evidence"
         }
         warning={
@@ -580,24 +599,12 @@ const BACKUP_SCHEDULE_PRESETS = [
   {
     label: "Hourly · on the hour",
     value: "0 * * * *",
-    description: "Runs at minute 0 of every hour in UTC. Best for a low RPO.",
-  },
-  {
-    label: "Every 6 hours",
-    value: "0 */6 * * *",
-    description:
-      "Runs four times per day at 00:00, 06:00, 12:00, and 18:00 UTC.",
+    description: "Runs at minute 0 of every hour in UTC.",
   },
   {
     label: "Daily · 02:00 UTC (recommended)",
     value: "0 2 * * *",
     description: "A balanced default that runs once per day at 02:00 UTC.",
-  },
-  {
-    label: "Weekly · Sunday 02:00 UTC",
-    value: "0 2 * * 0",
-    description:
-      "Runs once a week. Suitable only when a seven-day recovery point is acceptable.",
   },
 ];
 
@@ -605,7 +612,7 @@ const RETENTION_PRESETS = [
   {
     label: "7 days",
     value: 7,
-    description: "One week of recovery points with the lowest storage use.",
+    description: "One week of backup archives with the lowest storage use.",
   },
   {
     label: "30 days (recommended)",
@@ -622,53 +629,6 @@ const RETENTION_PRESETS = [
     value: 365,
     description:
       "One year of archives; confirm storage cost and lifecycle policy.",
-  },
-];
-
-const RPO_PRESETS = [
-  {
-    label: "1 hour",
-    value: 1,
-    description: "Target no more than one hour of potential data loss.",
-  },
-  {
-    label: "6 hours",
-    value: 6,
-    description: "Target no more than six hours of potential data loss.",
-  },
-  {
-    label: "12 hours",
-    value: 12,
-    description: "Target no more than half a day of potential data loss.",
-  },
-  {
-    label: "24 hours (recommended for daily backups)",
-    value: 24,
-    description: "Matches the recommended daily schedule.",
-  },
-];
-
-const RTO_PRESETS = [
-  {
-    label: "1 hour",
-    value: 1,
-    description: "Aggressive restore target requiring practiced automation.",
-  },
-  {
-    label: "2 hours",
-    value: 2,
-    description: "Fast recovery target with regular restore drills.",
-  },
-  {
-    label: "4 hours (recommended)",
-    value: 4,
-    description: "Balanced operational target for a dedicated instance.",
-  },
-  { label: "8 hours", value: 8, description: "Business-day recovery target." },
-  {
-    label: "24 hours",
-    value: 24,
-    description: "Next-day recovery target for lower-priority environments.",
   },
 ];
 
@@ -708,15 +668,31 @@ function validateForm(form: BackupForm | null) {
     issues.push("Enabled backups require a schedule.");
   if (form.enabled && !form.destinationAlias)
     issues.push("Enabled backups require a destination alias.");
-  if (
-    ![form.retentionDays, form.rpoHours, form.rtoHours].every(
-      (value) => Number.isSafeInteger(value) && value > 0,
-    )
-  )
-    issues.push(
-      "Retention, Recovery Point Objective (RPO), and Recovery Time Objective (RTO) must be positive whole numbers.",
-    );
+  if (!Number.isSafeInteger(form.retentionDays) || form.retentionDays <= 0)
+    issues.push("Retention days must be a positive whole number.");
   return issues;
+}
+
+function normalizeBackupPolicy(form: BackupForm): BackupForm {
+  return {
+    ...form,
+    rpoHours: backupIntervalHours(form.schedule) ?? form.rpoHours,
+  };
+}
+
+function backupIntervalHours(schedule: string | null): number | null {
+  switch (schedule) {
+    case "0 * * * *":
+      return 1;
+    case "0 */6 * * *":
+      return 6;
+    case "0 2 * * *":
+      return 24;
+    case "0 2 * * 0":
+      return 168;
+    default:
+      return null;
+  }
 }
 
 function formatBytes(value: number) {

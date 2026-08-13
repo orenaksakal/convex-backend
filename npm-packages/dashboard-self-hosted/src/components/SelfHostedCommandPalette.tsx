@@ -2,6 +2,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { MagnifyingGlassIcon } from "@radix-ui/react-icons";
 import { useRouter } from "next/router";
 import { Button } from "@ui/Button";
+import {
+  fleetDeploymentHref,
+  isFleetDeploymentId,
+} from "../lib/fleetSelection";
 
 const PAGES = [
   {
@@ -54,13 +58,7 @@ const PAGES = [
   {
     group: "Settings",
     key: "settings",
-    label: "Snapshot import and export",
-    href: "/settings/snapshots",
-  },
-  {
-    group: "Settings",
-    key: "settings",
-    label: "Backup and restore",
+    label: "Data protection",
     href: "/settings/backups",
   },
   {
@@ -84,7 +82,7 @@ const PAGES = [
   {
     group: "Settings",
     key: "settings",
-    label: "Releases and recovery",
+    label: "Backend Updates",
     href: "/settings/releases",
   },
   {
@@ -167,13 +165,20 @@ export function SelfHostedCommandPalette({
 
   function navigateToSelectedPage() {
     const selected = pages[selectedIndex];
-    if (selected) void router.push(selected.href);
+    if (selected) {
+      const deploymentId = router.query.deployment;
+      void router.push(
+        isFleetDeploymentId(deploymentId)
+          ? fleetDeploymentHref(selected.href, deploymentId)
+          : selected.href,
+      );
+    }
   }
 
   return (
     <>
       <Button
-        className="fixed top-3 right-14 z-50 hidden sm:flex"
+        className="fixed top-[calc(100%-3.5rem)] right-4 z-50 flex size-10 rounded-full shadow-lg sm:top-3 sm:right-14 sm:size-auto sm:rounded-md sm:shadow-none"
         size="xs"
         variant="neutral"
         onClick={() => {
@@ -184,8 +189,8 @@ export function SelfHostedCommandPalette({
         aria-label="Open deployment command palette"
       >
         <MagnifyingGlassIcon />
-        Navigate
-        <kbd className="ml-1 rounded-sm border bg-background-tertiary px-1 text-[10px] text-content-secondary">
+        <span className="sr-only sm:not-sr-only">Navigate</span>
+        <kbd className="ml-1 hidden rounded-sm border bg-background-tertiary px-1 text-[10px] text-content-secondary sm:inline">
           ⌘K
         </kbd>
       </Button>

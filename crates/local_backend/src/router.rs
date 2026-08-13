@@ -45,6 +45,7 @@ use tower_http::{
         CorsLayer,
     },
     decompression::RequestDecompressionLayer,
+    limit::RequestBodyLimitLayer,
 };
 use udf::HTTP_ACTION_BODY_LIMIT;
 use utoipa::{
@@ -550,13 +551,17 @@ where
             "/",
             get(|| async { "This Convex deployment is running. See https://docs.convex.dev/." }),
         )
-        .route(
-            "/echo",
-            post(|body: axum::body::Body| async move { body })
-        // Limit requests to 128MiB to help mitigate DDoS attacks.
-        .layer(DefaultBodyLimit::max(*MAX_ECHO_BYTES)),
-        )
+        .merge(echo_routes(*MAX_ECHO_BYTES))
         .layer(cors())
+}
+
+fn echo_routes<S>(max_request_bytes: usize) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    Router::new()
+        .route("/echo", post(|body: axum::body::Body| async move { body }))
+        .layer(RequestBodyLimitLayer::new(max_request_bytes))
 }
 
 // IMPORTANT NOTE: Those routes are proxied by Usher. Any changes to the router,
@@ -622,4 +627,52 @@ pub fn cors() -> CorsLayer {
         ])
         .allow_origin(AllowOrigin::mirror_request())
         .max_age(Duration::from_secs(86400))
+}
+
+#[cfg(test)]
+mod echo_route_tests {
+    use axum::{
+        body::Body,
+        http::Request,
+    };
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn echo_route_rejects_known_oversized_body() -> anyhow::Result<()> {
+        let response = echo_routes::<()>(4)
+            .oneshot(
+                Request::post("/echo")
+                    .header("content-length", "5")
+                    .body(Body::from("12345"))?,
+            )
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn echo_route_terminates_oversized_stream_without_content_length() -> anyhow::Result<()> {
+        let response = echo_routes::<()>(4)
+            .oneshot(Request::post("/echo").body(Body::from("12345"))?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.into_body().collect().await.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn echo_route_preserves_requests_within_limit() -> anyhow::Result<()> {
+        let response = echo_routes::<()>(4)
+            .oneshot(Request::post("/echo").body(Body::from("1234"))?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.into_body().collect().await?.to_bytes(), "1234");
+        Ok(())
+    }
 }

@@ -17,6 +17,7 @@ export type OperatorConfiguration = {
     displayName: string;
     deploymentUrl: string;
     siteUrl: string | null;
+    applicationOrigin: string | null;
   };
   runtime: {
     profile: string;
@@ -217,6 +218,11 @@ export type OperatorMetadata = {
 export type ApplicationOperations = {
   schemaVersion: 1;
   generatedAt: string;
+  impersonationHandoff: {
+    enabled: boolean;
+    trustedOrigin: string | null;
+    path: "/operator/impersonate" | null;
+  };
   database: {
     name: string;
     sizeBytes: number;
@@ -316,7 +322,11 @@ export type ExecutedOperatorAction = {
   actionId: string;
   kind: string;
   acceptedAt: string;
-  result: Record<string, unknown>;
+  state: "queued" | "running" | "succeeded" | "failed";
+  startedAt: string | null;
+  completedAt: string | null;
+  result: Record<string, unknown> | null;
+  failure: { code: string; message: string } | null;
 };
 
 export class OperatorApiError extends Error {
@@ -354,6 +364,10 @@ export function selectFleetOperatorDeployment(deploymentId: string | null) {
   }
   fleetDeploymentId = deploymentId;
   sessionRequest = null;
+}
+
+export function operatorActionScope() {
+  return fleetDeploymentId ?? "standalone";
 }
 
 export async function operatorGet<T>(path: string): Promise<T> {

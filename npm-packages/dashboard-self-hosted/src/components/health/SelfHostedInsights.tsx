@@ -161,35 +161,37 @@ export function SelfHostedInsights() {
   const coverageLabel = !diagnostics
     ? "Unavailable"
     : diagnostics.recordsInWindow === 0
-      ? "No observed completions"
+      ? "No activity to analyze"
       : durableWindowCovered
-        ? "Durable requested window"
+        ? `Full ${form?.lookbackHours ?? "requested"}-hour history checked`
         : durableHistory
-          ? "Bounded durable history"
-          : "Buffered partial history";
+          ? "Part of the saved history checked"
+          : "Recent activity checked";
   const issueLabel = !result
     ? "Unknown"
     : result.insights.length === 0
-      ? "No issues observed"
-      : `${result.insights.length} issue${result.insights.length === 1 ? "" : "s"}`;
+      ? diagnostics?.recordsInWindow === 0
+        ? "Nothing checked"
+        : "None found"
+      : `${result.insights.length} problem${result.insights.length === 1 ? "" : "s"}`;
 
   return (
     <div className="flex flex-col gap-4 pb-4">
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <InsightMetric
-          label="Coverage"
+          label="Activity checked"
           value={coverageLabel}
           detail={
             diagnostics?.firstTimestamp
               ? `${new Date(diagnostics.firstTimestamp).toLocaleString()} to ${new Date(diagnostics.lastTimestamp!).toLocaleString()}`
               : durableHistory
-                ? `${durableHistory.bytesRead.toLocaleString()} of ${durableHistory.observedFileBytes.toLocaleString()} bytes read`
-                : "No validated coverage interval"
+                ? historyCoverageDetail(durableHistory)
+                : "No time range was available to check"
           }
           warning={!durableWindowCovered}
         />
         <InsightMetric
-          label="Records"
+          label="Function runs checked"
           value={
             diagnostics
               ? diagnostics.recordsInWindow.toLocaleString()
@@ -198,29 +200,35 @@ export function SelfHostedInsights() {
           detail={
             diagnostics
               ? boundedProbeExpired
-                ? `0 retained completions returned during a 5-second bounded probe · requested ${form?.lookbackHours ?? "?"}h`
+                ? `No completed function runs were available during the check for the last ${form?.lookbackHours ?? "requested"} hours`
                 : durableHistory
-                  ? `${diagnostics.inputRecords.toLocaleString()} sanitized durable records · requested ${form?.lookbackHours ?? "?"}h`
-                  : `${diagnostics.inputRecords.toLocaleString()} buffered inputs · requested ${form?.lookbackHours ?? "?"}h`
-              : "Analysis unavailable"
+                  ? diagnostics.inputRecords === 0
+                    ? `The saved activity log contains no completed function runs from the last ${form?.lookbackHours ?? "requested"} hours`
+                    : `${diagnostics.inputRecords.toLocaleString()} saved log entries inspected for the last ${form?.lookbackHours ?? "requested"} hours`
+                  : `${diagnostics.inputRecords.toLocaleString()} recent log entries inspected for the last ${form?.lookbackHours ?? "requested"} hours`
+              : "Could not analyze function activity"
           }
           warning={!diagnostics || diagnostics.recordsInWindow === 0}
         />
         <InsightMetric
-          label="Observed result"
+          label="Problems found"
           value={issueLabel}
-          detail="Absence of issues in a bounded buffer is not a health guarantee"
+          detail={
+            diagnostics?.recordsInWindow === 0
+              ? "There was no activity to inspect, so this result does not confirm that the deployment is healthy"
+              : "Only the function activity shown here was checked; this is not a full deployment health check"
+          }
           warning={
             !result || result.insights.length > 0 || !form?.durableHistoryAlias
           }
         />
         <InsightMetric
-          label="Durable history"
-          value={form?.durableHistoryAlias ?? "Not configured"}
+          label="Saved activity log"
+          value={form?.durableHistoryAlias ? "Connected" : "Not connected"}
           detail={
             durableHistory
-              ? `${durableHistory.byteLimited || durableHistory.recordLimited ? "Bounded" : "Complete file read"} · ${durableHistory.malformedRecords} malformed · ${durableHistory.recordsDroppedByLimit} record-limited`
-              : "Named server-side log-history source; secret values are never returned"
+              ? historyReadDetail(durableHistory)
+              : "Connect a server-side activity log to check more than recent buffered events"
           }
           warning={!form?.durableHistoryAlias}
         />
@@ -238,25 +246,33 @@ export function SelfHostedInsights() {
       {diagnostics && (
         <div className="grid gap-3 rounded-lg border bg-background-secondary p-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
           <div>
-            <span className="text-content-secondary">Peak documents</span>
+            <span className="text-content-secondary">
+              Most documents read by one function
+            </span>
             <div className="font-medium">
               {diagnostics.peakDocumentsRead.toLocaleString()}
             </div>
           </div>
           <div>
-            <span className="text-content-secondary">Document warning</span>
+            <span className="text-content-secondary">
+              Document warning starts at
+            </span>
             <div className="font-medium">
               {diagnostics.documentsWarningThreshold.toLocaleString()}
             </div>
           </div>
           <div>
-            <span className="text-content-secondary">Peak bytes</span>
+            <span className="text-content-secondary">
+              Most data read by one function
+            </span>
             <div className="font-medium">
               {formatBytes(diagnostics.peakBytesRead)}
             </div>
           </div>
           <div>
-            <span className="text-content-secondary">Byte warning</span>
+            <span className="text-content-secondary">
+              Data warning starts at
+            </span>
             <div className="font-medium">
               {formatBytes(diagnostics.bytesWarningThreshold)}
             </div>
@@ -576,6 +592,29 @@ function insightDescription(label: string) {
   if (label === "Document read limit")
     return "Document count used to classify read-pressure evidence.";
   return "Total bytes read used to classify read-pressure evidence.";
+}
+
+function historyCoverageDetail(history: OperatorInsightsHistory) {
+  if (history.observedFileBytes === 0) return "The saved activity log is empty";
+  if (history.bytesRead >= history.observedFileBytes)
+    return `The entire ${formatBytes(history.observedFileBytes)} saved activity log was checked`;
+  return `${formatBytes(history.bytesRead)} of ${formatBytes(history.observedFileBytes)} in the saved activity log was checked`;
+}
+
+function historyReadDetail(history: OperatorInsightsHistory) {
+  const scope =
+    history.byteLimited || history.recordLimited
+      ? "Only part of the saved log was checked"
+      : "The entire saved log was checked";
+  const readability =
+    history.malformedRecords === 0
+      ? "all records were readable"
+      : `${history.malformedRecords.toLocaleString()} unreadable record${history.malformedRecords === 1 ? "" : "s"}`;
+  const skipped =
+    history.recordsDroppedByLimit === 0
+      ? "no records were skipped"
+      : `${history.recordsDroppedByLimit.toLocaleString()} record${history.recordsDroppedByLimit === 1 ? " was" : "s were"} skipped because of the safety limit`;
+  return `${scope} · ${readability} · ${skipped}`;
 }
 
 function validateForm(form: InsightsForm | null) {

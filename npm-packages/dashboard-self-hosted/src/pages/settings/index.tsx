@@ -1,4 +1,4 @@
-import { useContext, useEffect, useMemo, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import { DeploymentSettingsLayout } from "@common/layouts/DeploymentSettingsLayout";
 import { PauseDeployment } from "@common/features/settings/components/PauseDeployment";
 import { useScrollToHash } from "@common/lib/useScrollToHash";
@@ -8,17 +8,13 @@ import {
   EvidenceCard,
   formatOperatorDate,
   OperatorError,
-  OperatorField,
   OperatorLoading,
-  OperatorNumberPresetField,
-  operatorInputClasses,
 } from "../../components/operator/OperatorPagePrimitives";
 import { useOperatorState } from "../../components/operator/useOperatorState";
 import { EffectiveHealthSummary } from "../../components/operator/EffectiveHealthSummary";
 import { OperatorConfiguration } from "../../lib/operatorApi";
 import { SelfHostedSettingsContext } from "../../lib/selfHostedSettings";
 
-type ProvidersForm = OperatorConfiguration["providers"];
 type SafetyForm = {
   dashboardEditConfirmation: boolean;
   redactLogsToClient: boolean;
@@ -29,9 +25,6 @@ export default function Settings() {
   useScrollToHash("#pause-deployment", pauseDeploymentRef);
   const operator = useOperatorState();
   const selfHostedSettings = useContext(SelfHostedSettingsContext);
-  const [form, setForm] = useState<ProvidersForm | null>(null);
-  const [reviewing, setReviewing] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [safetyForm, setSafetyForm] = useState<SafetyForm | null>(null);
   const [safetyReviewing, setSafetyReviewing] = useState(false);
   const [safetySaving, setSafetySaving] = useState(false);
@@ -40,15 +33,8 @@ export default function Settings() {
 
   useEffect(() => {
     if (!operator.configuration) return;
-    setForm(operator.configuration.providers);
     setSafetyForm(safetyFromConfiguration(operator.configuration));
   }, [operator.configuration]);
-
-  const changed =
-    form !== null &&
-    operator.configuration !== null &&
-    JSON.stringify(form) !== JSON.stringify(operator.configuration.providers);
-  const issues = useMemo(() => validateProviders(form), [form]);
   const originalSafety = operator.configuration
     ? safetyFromConfiguration(operator.configuration)
     : null;
@@ -56,20 +42,6 @@ export default function Settings() {
     safetyForm !== null &&
     originalSafety !== null &&
     JSON.stringify(safetyForm) !== JSON.stringify(originalSafety);
-
-  async function save() {
-    if (!form || issues.length > 0) return;
-    setSaving(true);
-    try {
-      const result = await operator.patch({ providers: form });
-      setForm(result.current.providers);
-      setReviewing(false);
-    } catch {
-      // The shared hook renders the exact API error and refreshes conflicts.
-    } finally {
-      setSaving(false);
-    }
-  }
 
   async function saveSafety() {
     if (!safetyForm) return;
@@ -126,35 +98,19 @@ export default function Settings() {
           <OperatorError error={operator.error} onRetry={operator.refresh} />
         )}
 
-        {configuration && form && !operator.loading && (
+        {configuration && !operator.loading && (
           <>
             <section
-              className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"
+              className="grid min-w-0 gap-3 sm:grid-cols-2 xl:grid-cols-4"
               aria-label="Deployment summary"
             >
               <EvidenceCard
                 label="Instance"
                 value={configuration.instance.displayName}
-                detail={configuration.instance.id}
+                detail={hostLabel(configuration.instance.deploymentUrl)}
               />
               <EvidenceCard
-                label="Deployment URL"
-                value={hostLabel(configuration.instance.deploymentUrl)}
-                detail={
-                  configuration.instance.siteUrl
-                    ? `Site ${configuration.instance.siteUrl}`
-                    : "No site URL declared"
-                }
-              />
-              <EvidenceCard
-                label="Configuration"
-                value={`Revision ${configuration.revision}`}
-                detail={`Updated ${formatOperatorDate(
-                  configuration.updatedAt,
-                )}`}
-              />
-              <EvidenceCard
-                label="Instance health"
+                label="Serving"
                 value={status?.health.state ?? "Unavailable"}
                 detail={
                   status
@@ -172,47 +128,38 @@ export default function Settings() {
                 }
               />
               <EvidenceCard
-                label="Runtime profile"
-                value={configuration.runtime.profile}
-                detail={`${formatBytes(
-                  configuration.runtime.memoryMaxBytes,
-                )} memory.max · no CPU quota`}
-              />
-              <EvidenceCard
-                label="Database"
-                value={status?.providers.database.kind ?? form.database.kind}
-                detail={providerDetail(
-                  status?.providers.database.state,
-                  status?.providers.database.checkedAt,
-                )}
-                warning={
-                  status?.freshness.state !== "current" ||
-                  status?.providers.database.state !== "healthy"
-                }
-              />
-              <EvidenceCard
-                label="Object storage"
+                label="Recovery"
                 value={
-                  status?.providers.objectStorage.kind ??
-                  form.objectStorage.kind
+                  status?.backups.lastSuccessful?.verified
+                    ? "Protected"
+                    : configuration.backup.enabled
+                      ? "Needs backup"
+                      : "Not enabled"
                 }
-                detail={providerDetail(
-                  status?.providers.objectStorage.state,
-                  status?.providers.objectStorage.checkedAt,
-                )}
+                detail={
+                  status?.backups.lastSuccessful
+                    ? `Last verified ${formatOperatorDate(status.backups.lastSuccessful.completedAt)}`
+                    : "No verified recovery point"
+                }
                 warning={
-                  status?.freshness.state !== "current" ||
-                  status?.providers.objectStorage.state !== "healthy"
+                  configuration.backup.enabled &&
+                  !status?.backups.lastSuccessful?.verified
                 }
               />
               <EvidenceCard
-                label="Backend image"
-                value={shortDigest(status?.release.backendImageDigest)}
+                label="Alerts"
+                value={status?.alerts.state ?? "Unknown"}
                 detail={
-                  status?.release.backendImageDigest ??
-                  "Effective digest not reported"
+                  status?.alerts.state === "firing"
+                    ? `${status.alerts.reasons?.length ?? 0} active reasons`
+                    : status?.alerts.lastDeliveryAt
+                      ? `Last delivered ${formatOperatorDate(status.alerts.lastDeliveryAt)}`
+                      : "No active production incident"
                 }
-                warning={!status?.release.backendImageDigest}
+                warning={
+                  status?.alerts.state === "firing" ||
+                  status?.alerts.state === "delivery_failed"
+                }
               />
             </section>
 
@@ -226,214 +173,24 @@ export default function Settings() {
               aria-labelledby="provider-title"
             >
               <h4 id="provider-title" className="font-semibold">
-                Persistence providers
+                Managed persistence
               </h4>
               <p className="mt-1 text-sm text-content-secondary">
-                Configure provider modes and named server-side references. Raw
-                passwords, access keys, unrestricted endpoint URLs, buckets,
-                DNS, and proxy configuration are never returned to the browser.
+                Every deployment uses an isolated PostgreSQL database and
+                private Cloudflare R2 storage. The fleet provisioner creates,
+                scopes, verifies, and rotates these resources automatically.
               </p>
-
-              <div className="mt-4 grid gap-4 sm:grid-cols-2">
-                <OperatorField
-                  label="Database provider"
-                  description="PostgreSQL is the reviewed persistence provider for this deployment profile."
-                >
-                  <select
-                    className={operatorInputClasses}
-                    value={form.database.kind}
-                    disabled
-                  >
-                    <option value="postgres">PostgreSQL</option>
-                  </select>
-                </OperatorField>
-                <OperatorField
-                  label="Database credential reference"
-                  description="Named secret reference on the operator host; not the credential itself."
-                >
-                  <input
-                    className={operatorInputClasses}
-                    value={form.database.credentialRef ?? ""}
-                    onChange={(event) =>
-                      setForm({
-                        ...form,
-                        database: {
-                          ...form.database,
-                          credentialRef: nullIfEmpty(event.target.value),
-                        },
-                      })
-                    }
-                    autoComplete="off"
-                  />
-                </OperatorField>
-                <OperatorField
-                  label="Object-storage provider"
-                  description="Select the compatible API behavior used by storage and snapshots."
-                >
-                  <select
-                    className={operatorInputClasses}
-                    value={form.objectStorage.kind}
-                    onChange={(event) =>
-                      setForm({
-                        ...form,
-                        objectStorage: {
-                          ...form.objectStorage,
-                          kind: event.target.value,
-                        },
-                      })
-                    }
-                  >
-                    <option value="cloudflare-r2">
-                      Cloudflare R2 object storage
-                    </option>
-                    <option value="aws-s3">
-                      Amazon Simple Storage Service (S3)
-                    </option>
-                    <option value="s3-compatible">
-                      S3-compatible object storage
-                    </option>
-                  </select>
-                </OperatorField>
-                <OperatorField
-                  label="Endpoint alias"
-                  description="Safe name for an object-storage endpoint already configured on the private operator host. The browser stores this alias instead of accepting an unrestricted endpoint URL."
-                >
-                  <input
-                    className={operatorInputClasses}
-                    value={form.objectStorage.endpointAlias ?? ""}
-                    onChange={(event) =>
-                      setForm({
-                        ...form,
-                        objectStorage: {
-                          ...form.objectStorage,
-                          endpointAlias: nullIfEmpty(event.target.value),
-                        },
-                      })
-                    }
-                    autoComplete="off"
-                  />
-                </OperatorField>
-                <OperatorField
-                  label="Object-storage credential reference"
-                  description="Named secret reference; access and secret keys are write-only outside this API."
-                >
-                  <input
-                    className={operatorInputClasses}
-                    value={form.objectStorage.credentialRef ?? ""}
-                    onChange={(event) =>
-                      setForm({
-                        ...form,
-                        objectStorage: {
-                          ...form.objectStorage,
-                          credentialRef: nullIfEmpty(event.target.value),
-                        },
-                      })
-                    }
-                    autoComplete="off"
-                  />
-                </OperatorField>
-                <div />
-                <NullableNumberField
-                  label="Fixed multipart part size"
-                  description="Size in bytes of each non-final chunk in a multipart upload. Cloudflare R2 requires fixed-size non-final chunks; larger chunks reduce request count but use more memory per concurrent upload."
-                  value={form.objectStorage.fixedMultipartPartSizeBytes}
-                  onChange={(fixedMultipartPartSizeBytes) =>
-                    setForm({
-                      ...form,
-                      objectStorage: {
-                        ...form.objectStorage,
-                        fixedMultipartPartSizeBytes,
-                      },
-                    })
-                  }
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                <ManagedProvider
+                  name="PostgreSQL"
+                  detail="One database and role scoped to this deployment"
+                  state={status?.providers.database.state ?? "unknown"}
                 />
-                <NullableNumberField
-                  label="Maximum multipart object size"
-                  description="Reject objects that would exceed the provider's 10,000-part limit."
-                  value={form.objectStorage.maxMultipartObjectSizeBytes}
-                  onChange={(maxMultipartObjectSizeBytes) =>
-                    setForm({
-                      ...form,
-                      objectStorage: {
-                        ...form.objectStorage,
-                        maxMultipartObjectSizeBytes,
-                      },
-                    })
-                  }
+                <ManagedProvider
+                  name="Cloudflare R2"
+                  detail="Private file, module, export, and backup storage"
+                  state={status?.providers.objectStorage.state ?? "unknown"}
                 />
-              </div>
-
-              {status?.providers.objectStorage
-                .effectiveMultipartPartSizeBytes && (
-                <p className="mt-3 text-sm text-content-secondary">
-                  Effective probe:{" "}
-                  {formatBytes(
-                    status.providers.objectStorage
-                      .effectiveMultipartPartSizeBytes,
-                  )}{" "}
-                  parts; maximum{" "}
-                  {status.providers.objectStorage.maximumObjectSizeBytes
-                    ? formatBytes(
-                        status.providers.objectStorage.maximumObjectSizeBytes,
-                      )
-                    : "not reported"}
-                  .
-                </p>
-              )}
-
-              {issues.length > 0 && (
-                <Callout variant="error">
-                  <ul className="list-disc pl-5">
-                    {issues.map((issue) => (
-                      <li key={issue}>{issue}</li>
-                    ))}
-                  </ul>
-                </Callout>
-              )}
-
-              {reviewing && changed && (
-                <div className="mt-4 rounded-md border bg-background-primary p-3 text-sm">
-                  <div className="font-medium">Review provider revision</div>
-                  <p className="mt-1">
-                    Target <code>{configuration.instance.id}</code>, base
-                    revision {configuration.revision}. Saving changes does not
-                    restart the backend or create external resources.
-                  </p>
-                  <pre className="mt-3 scrollbar overflow-auto rounded-sm bg-background-tertiary p-3 text-xs">
-                    {JSON.stringify(form, null, 2)}
-                  </pre>
-                  <div className="mt-3 flex gap-2">
-                    <Button onClick={() => void save()} loading={saving}>
-                      Apply reviewed providers
-                    </Button>
-                    <Button
-                      variant="neutral"
-                      onClick={() => setReviewing(false)}
-                      disabled={saving}
-                    >
-                      Cancel
-                    </Button>
-                  </div>
-                </div>
-              )}
-
-              <div className="mt-4 flex gap-2">
-                <Button
-                  disabled={!changed || issues.length > 0}
-                  onClick={() => setReviewing(true)}
-                >
-                  Review provider change
-                </Button>
-                <Button
-                  variant="neutral"
-                  disabled={!changed}
-                  onClick={() => {
-                    setForm(configuration.providers);
-                    setReviewing(false);
-                  }}
-                >
-                  Reset
-                </Button>
               </div>
             </section>
 
@@ -461,7 +218,7 @@ export default function Settings() {
                     className="mt-0.5"
                     type="checkbox"
                     checked={safetyForm?.dashboardEditConfirmation ?? true}
-                    onChange={(event) =>
+                    onChange={event =>
                       setSafetyForm({
                         ...(safetyForm ?? {
                           dashboardEditConfirmation: true,
@@ -492,7 +249,7 @@ export default function Settings() {
                     className="mt-0.5"
                     type="checkbox"
                     checked={safetyForm?.redactLogsToClient ?? true}
-                    onChange={(event) =>
+                    onChange={event =>
                       setSafetyForm({
                         ...(safetyForm ?? {
                           dashboardEditConfirmation: true,
@@ -547,9 +304,9 @@ export default function Settings() {
                   true
                     ? "Enabled"
                     : status?.runtime.effectiveKnobs?.REDACT_LOGS_TO_CLIENT ===
-                      false
-                    ? "Disabled"
-                    : "Not observed"}
+                        false
+                      ? "Disabled"
+                      : "Not observed"}
                 </dd>
               </dl>
 
@@ -635,117 +392,33 @@ function safetyFromConfiguration(
   };
 }
 
-function NullableNumberField({
-  label,
-  description,
-  value,
-  onChange,
+function ManagedProvider({
+  name,
+  detail,
+  state,
 }: {
-  label: string;
-  description: string;
-  value: number | null;
-  onChange: (value: number | null) => void;
+  name: string;
+  detail: string;
+  state: string;
 }) {
-  const isPartSize = label.includes("part size");
+  const healthy = state === "healthy";
   return (
-    <OperatorNumberPresetField
-      label={label}
-      description={description}
-      value={value}
-      presets={isPartSize ? MULTIPART_SIZE_PRESETS : OBJECT_SIZE_PRESETS}
-      min={1}
-      onChange={onChange}
-      customLabel="Custom byte count"
-      formatValue={formatBytes}
-    />
+    <div className="flex items-start justify-between gap-4 rounded-md border bg-background-primary p-3">
+      <div>
+        <div className="font-medium">{name}</div>
+        <div className="mt-1 text-sm text-content-secondary">{detail}</div>
+      </div>
+      <span
+        className={`shrink-0 rounded-full px-2 py-1 text-xs font-medium capitalize ${
+          healthy
+            ? "bg-background-success text-content-success"
+            : "bg-background-warning text-content-warning"
+        }`}
+      >
+        {state}
+      </span>
+    </div>
   );
-}
-
-const MULTIPART_SIZE_PRESETS = [
-  {
-    label: "Automatic",
-    value: null,
-    description: "Let the provider adapter use its reviewed default.",
-  },
-  {
-    label: "8 MiB (recommended)",
-    value: 8 * 1024 ** 2,
-    description: "Balanced memory use and request count for Cloudflare R2.",
-  },
-  {
-    label: "16 MiB",
-    value: 16 * 1024 ** 2,
-    description: "Fewer upload requests with twice the per-upload memory.",
-  },
-  {
-    label: "32 MiB",
-    value: 32 * 1024 ** 2,
-    description: "Useful for larger archives when memory headroom is ample.",
-  },
-  {
-    label: "64 MiB",
-    value: 64 * 1024 ** 2,
-    description:
-      "High-throughput option with materially higher concurrent memory use.",
-  },
-];
-
-const OBJECT_SIZE_PRESETS = [
-  {
-    label: "Automatic",
-    value: null,
-    description: "Let the provider adapter enforce its reviewed maximum.",
-  },
-  {
-    label: "10 GiB",
-    value: 10 * 1024 ** 3,
-    description: "Conservative cap for smaller instances and exports.",
-  },
-  {
-    label: "40 GiB",
-    value: 40 * 1024 ** 3,
-    description: "Allows larger snapshots while bounding transfer size.",
-  },
-  {
-    label: "78.125 GiB (recommended)",
-    value: 83_886_080_000,
-    description: "Matches 10,000 fixed 8 MiB multipart chunks.",
-  },
-];
-
-function validateProviders(form: ProvidersForm | null) {
-  if (!form) return [];
-  const issues: string[] = [];
-  if (form.database.kind !== "postgres")
-    issues.push("Only PostgreSQL is supported by this profile.");
-  if (
-    !["aws-s3", "cloudflare-r2", "s3-compatible"].includes(
-      form.objectStorage.kind,
-    )
-  )
-    issues.push("Object-storage provider is unsupported.");
-  const part = form.objectStorage.fixedMultipartPartSizeBytes;
-  const maximum = form.objectStorage.maxMultipartObjectSizeBytes;
-  if (
-    [part, maximum].some(
-      (value) => value !== null && (!Number.isSafeInteger(value) || value <= 0),
-    )
-  )
-    issues.push("Multipart values must be positive whole byte counts.");
-  if (part !== null && maximum !== null && Math.ceil(maximum / part) > 10_000)
-    issues.push(
-      "Multipart configuration would require more than 10,000 parts.",
-    );
-  return issues;
-}
-
-function providerDetail(
-  state: string | undefined,
-  checkedAt: string | undefined,
-) {
-  return state
-    ? `${state} · checked ${formatOperatorDate(checkedAt)}`
-    : "Connectivity evidence unavailable";
 }
 
 function hostLabel(value: string) {
@@ -754,17 +427,4 @@ function hostLabel(value: string) {
   } catch {
     return "Invalid URL";
   }
-}
-
-function formatBytes(value: number) {
-  if (value >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(1)} gibibytes`;
-  return `${(value / 1024 ** 2).toFixed(1)} mebibytes`;
-}
-
-function shortDigest(value: string | null | undefined) {
-  return value ? `${value.slice(0, 15)}…${value.slice(-8)}` : "Not reported";
-}
-
-function nullIfEmpty(value: string) {
-  return value.trim() === "" ? null : value.trim();
 }

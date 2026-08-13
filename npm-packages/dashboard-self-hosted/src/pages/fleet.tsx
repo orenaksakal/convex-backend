@@ -6,6 +6,8 @@ import {
   CrossCircledIcon,
   CubeIcon,
   ExclamationTriangleIcon,
+  GlobeIcon,
+  Link2Icon,
   PlusIcon,
   ReloadIcon,
   TrashIcon,
@@ -25,10 +27,10 @@ import {
 } from "react";
 
 import { EnvironmentBadge } from "../components/fleet/EnvironmentBadge";
+import { ConfirmationPhrase } from "../components/operator/ConfirmationPhrase";
 import {
   HealthSignal,
   SignalLevel,
-  TrafficLightLegend,
   signalForState,
 } from "../components/operator/HealthSignal";
 import {
@@ -36,6 +38,7 @@ import {
   FleetDeployment,
   FleetDeploymentHealth,
   FleetProject,
+  adoptFleetDeployment,
   cloneFleetDeployment,
   createFleetDeployment,
   createFleetProject,
@@ -44,7 +47,12 @@ import {
   fleetBootstrap,
   fleetDeploymentHealth,
   retryFleetDeployment,
+  reconfigureFleetDeploymentDomains,
 } from "../lib/fleetApi";
+import {
+  FleetMutationIntent,
+  resolveFleetMutationIntent,
+} from "../lib/fleetMutationIntent";
 
 export default function FleetPage() {
   const router = useRouter();
@@ -54,9 +62,11 @@ export default function FleetPage() {
   const [health, setHealth] = useState<Record<string, FleetDeploymentHealth>>(
     {},
   );
-  const [create, setCreate] = useState<"project" | "deployment" | null>(null);
+  const [create, setCreate] = useState<
+    "project" | "deployment" | "adopt" | null
+  >(null);
   const [deploymentAction, setDeploymentAction] = useState<{
-    kind: "clone" | "delete";
+    kind: "clone" | "domains" | "delete";
     deployment: FleetDeployment;
   } | null>(null);
   const [projectToDelete, setProjectToDelete] = useState<FleetProject | null>(
@@ -132,8 +142,8 @@ export default function FleetPage() {
         onRefresh={refresh}
         onCreateProject={() => setCreate("project")}
       />
-      <main className="mx-auto grid w-full max-w-[1440px] gap-8 px-5 py-8 lg:grid-cols-[280px_minmax(0,1fr)] lg:px-10">
-        <aside>
+      <main className="mx-auto grid w-full max-w-[1440px] gap-6 px-5 py-6 lg:grid-cols-[280px_minmax(0,1fr)] lg:gap-8 lg:px-10 lg:py-8">
+        <aside className="min-w-0">
           <div className="mb-3 flex items-center justify-between px-2">
             <div className="text-[11px] font-semibold tracking-[0.18em] text-content-tertiary uppercase">
               Projects
@@ -147,13 +157,14 @@ export default function FleetPage() {
               <PlusIcon />
             </Button>
           </div>
-          <div className="flex flex-col gap-1">
+          <div className="scrollbar flex gap-2 overflow-x-auto pb-2 lg:flex-col lg:gap-1 lg:overflow-visible lg:pb-0">
             {fleet?.projects.map((project) => (
-              <ProjectRow
-                key={project.id}
-                project={project}
-                selected={project.id === selectedProject?.id}
-              />
+              <div key={project.id} className="min-w-56 lg:min-w-0">
+                <ProjectRow
+                  project={project}
+                  selected={project.id === selectedProject?.id}
+                />
+              </div>
             ))}
           </div>
         </aside>
@@ -176,12 +187,16 @@ export default function FleetPage() {
               deployments={deployments}
               health={health}
               onCreate={() => setCreate("deployment")}
+              onAdopt={() => setCreate("adopt")}
               onRefresh={refresh}
               onClone={(deployment) =>
                 setDeploymentAction({ kind: "clone", deployment })
               }
               onDelete={(deployment) =>
                 setDeploymentAction({ kind: "delete", deployment })
+              }
+              onDomains={(deployment) =>
+                setDeploymentAction({ kind: "domains", deployment })
               }
               onDeleteProject={() => setProjectToDelete(selectedProject)}
             />
@@ -214,6 +229,16 @@ export default function FleetPage() {
           }}
         />
       ) : null}
+      {create === "adopt" && selectedProject ? (
+        <AdoptDeploymentModal
+          project={selectedProject}
+          onClose={() => setCreate(null)}
+          onAdopted={async () => {
+            await refresh();
+            setCreate(null);
+          }}
+        />
+      ) : null}
       {deploymentAction?.kind === "clone" && fleet ? (
         <CloneDeploymentModal
           deployment={deploymentAction.deployment}
@@ -233,6 +258,16 @@ export default function FleetPage() {
           deployment={deploymentAction.deployment}
           onClose={() => setDeploymentAction(null)}
           onDeleted={async () => {
+            await refresh();
+            setDeploymentAction(null);
+          }}
+        />
+      ) : null}
+      {deploymentAction?.kind === "domains" ? (
+        <ReconfigureDomainsModal
+          deployment={deploymentAction.deployment}
+          onClose={() => setDeploymentAction(null)}
+          onQueued={async () => {
             await refresh();
             setDeploymentAction(null);
           }}
@@ -271,7 +306,7 @@ function FleetTopBar({
           <div className="grid size-9 place-items-center rounded-xl border bg-background-primary shadow-sm">
             <CubeIcon className="size-5 text-content-accent" />
           </div>
-          <div className="min-w-0">
+          <div className="hidden min-w-0 sm:block">
             <div className="truncate text-sm font-semibold">Convex Freedom</div>
             <div className="truncate text-[11px] tracking-[0.16em] text-content-tertiary uppercase">
               Private deployment fleet
@@ -346,18 +381,22 @@ function ProjectDeployments({
   deployments,
   health,
   onCreate,
+  onAdopt,
   onRefresh,
   onClone,
   onDelete,
+  onDomains,
   onDeleteProject,
 }: {
   project: FleetProject;
   deployments: FleetDeployment[];
   health: Record<string, FleetDeploymentHealth>;
   onCreate(): void;
+  onAdopt(): void;
   onRefresh(): Promise<void>;
   onClone(deployment: FleetDeployment): void;
   onDelete(deployment: FleetDeployment): void;
+  onDomains(deployment: FleetDeployment): void;
   onDeleteProject(): void;
 }) {
   const ready = deployments.filter(
@@ -394,6 +433,9 @@ function ProjectDeployments({
               Delete project
             </Button>
           ) : null}
+          <Button variant="neutral" icon={<Link2Icon />} onClick={onAdopt}>
+            Adopt existing
+          </Button>
           <Button icon={<PlusIcon />} onClick={onCreate}>
             New deployment
           </Button>
@@ -409,6 +451,7 @@ function ProjectDeployments({
               onRefresh={onRefresh}
               onClone={() => onClone(deployment)}
               onDelete={() => onDelete(deployment)}
+              onDomains={() => onDomains(deployment)}
             />
           ))}
         </div>
@@ -437,12 +480,14 @@ function DeploymentCard({
   onRefresh,
   onClone,
   onDelete,
+  onDomains,
 }: {
   deployment: FleetDeployment;
   health?: FleetDeploymentHealth;
   onRefresh(): Promise<void>;
   onClone(): void;
   onDelete(): void;
+  onDomains(): void;
 }) {
   const ready = deployment.state === "ready";
   const deletionFailed =
@@ -450,15 +495,10 @@ function DeploymentCard({
     deployment.activeOperation?.kind === "deployment.delete";
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
+  const retryMutationIntent = useRef<FleetMutationIntent | null>(null);
   const signals = deploymentSignals(deployment, health);
   const operationalSignals = deploymentOperationalSignals(deployment, health);
   const operationalItems = deploymentOperationalItems(deployment, health);
-  const operationalWarnings = operationalItems.filter(
-    (item) => item.kind === "warning",
-  );
-  const recommendations = operationalItems.filter(
-    (item) => item.kind === "recommendation",
-  );
   return (
     <article className="group relative overflow-hidden rounded-2xl border bg-background-secondary p-5 shadow-sm transition hover:-translate-y-0.5 hover:shadow-md">
       <div
@@ -514,14 +554,8 @@ function DeploymentCard({
           ))}
         </div>
       </div>
-      {operationalWarnings.length ? (
-        <OperationalItems
-          title="Operational warnings"
-          items={operationalWarnings}
-        />
-      ) : null}
-      {recommendations.length ? (
-        <OperationalItems title="Recommendations" items={recommendations} />
+      {operationalItems.length ? (
+        <OperationalItems title="Needs attention" items={operationalItems} />
       ) : null}
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0 text-xs text-content-secondary">
@@ -543,6 +577,16 @@ function DeploymentCard({
           ) : null}
         </div>
         <div className="flex flex-wrap justify-end gap-2">
+          {ready ? (
+            <Button
+              variant="neutral"
+              size="sm"
+              icon={<GlobeIcon />}
+              onClick={onDomains}
+            >
+              Domains
+            </Button>
+          ) : null}
           {ready ? (
             <Button
               variant="neutral"
@@ -580,7 +624,14 @@ function DeploymentCard({
                 setRetrying(true);
                 setRetryError(null);
                 try {
-                  await retryFleetDeployment(deployment.id);
+                  await retryFleetDeployment(
+                    deployment.id,
+                    mutationIdempotencyKey(retryMutationIntent, {
+                      deploymentId: deployment.id,
+                      failedOperationId: deployment.activeOperation?.id ?? null,
+                    }),
+                  );
+                  retryMutationIntent.current = null;
                   await onRefresh();
                 } catch (caught) {
                   setRetryError(asError(caught).message);
@@ -629,9 +680,7 @@ function OperationalItems({
                     "mt-px size-2 shrink-0 rounded-full",
                     item.level === "critical"
                       ? "bg-util-error"
-                      : item.kind === "warning"
-                      ? "bg-util-warning"
-                      : "bg-util-accent",
+                      : "bg-util-warning",
                   )}
                   aria-hidden="true"
                 />
@@ -669,14 +718,19 @@ function CreateProjectModal({
   const [slug, setSlug] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const mutationIntent = useRef<FleetMutationIntent | null>(null);
   async function submit(event: FormEvent) {
     event.preventDefault();
     setLoading(true);
     try {
-      const result = await createFleetProject({
+      const input = {
         name,
         ...(slug ? { slug } : {}),
-      });
+      };
+      const result = await createFleetProject(
+        input,
+        mutationIdempotencyKey(mutationIntent, input),
+      );
       onCreated(result.project);
     } catch (caught) {
       setError(asError(caught).message);
@@ -741,11 +795,12 @@ function CreateDeploymentModal({
   const [applicationDomain, setApplicationDomain] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const mutationIntent = useRef<FleetMutationIntent | null>(null);
   async function submit(event: FormEvent) {
     event.preventDefault();
     setLoading(true);
     try {
-      await createFleetDeployment(project.slug, {
+      const input = {
         name,
         type,
         isDefault: type === "prod" && isDefault,
@@ -753,7 +808,15 @@ function CreateDeploymentModal({
         siteDomain,
         ...(applicationDomain ? { applicationDomain } : {}),
         ...(reference ? { reference } : {}),
-      });
+      };
+      await createFleetDeployment(
+        project.slug,
+        input,
+        mutationIdempotencyKey(mutationIntent, {
+          projectSlug: project.slug,
+          input,
+        }),
+      );
       onCreated();
     } catch (caught) {
       setError(asError(caught).message);
@@ -793,8 +856,8 @@ function CreateDeploymentModal({
                 </span>
                 <span className="mt-2 block text-xs/relaxed text-content-secondary">
                   {option === "dev"
-                    ? "24 connections · Optional backups · Alerts off"
-                    : "128 connections · Required backups · Alert destination required"}
+                    ? "24 connections · Daily R2 backups · Managed alerts"
+                    : "112 connections · Daily R2 backups · Managed alerts"}
                 </span>
               </Button>
             ))}
@@ -904,10 +967,385 @@ function CreateDeploymentModal({
               !name.trim() ||
               !deploymentDomain.trim() ||
               !siteDomain.trim() ||
-              deploymentDomain.trim() === siteDomain.trim()
+              !domainsAreDistinct(
+                deploymentDomain,
+                siteDomain,
+                applicationDomain,
+              )
             }
           >
             Create {type} deployment
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+export function AdoptDeploymentModal({
+  project,
+  onClose,
+  onAdopted,
+}: {
+  project: FleetProject;
+  onClose(): void;
+  onAdopted(): void;
+}) {
+  const [name, setName] = useState("");
+  const [reference, setReference] = useState("");
+  const [type, setType] = useState<"dev" | "prod">("dev");
+  const [isDefault, setIsDefault] = useState(false);
+  const [hostId, setHostId] = useState("");
+  const [deploymentUrl, setDeploymentUrl] = useState("");
+  const [siteUrl, setSiteUrl] = useState("");
+  const [dashboardUrl, setDashboardUrl] = useState("");
+  const [operatorUrl, setOperatorUrl] = useState("");
+  const [databaseBindingAlias, setDatabaseBindingAlias] = useState("");
+  const [confirmation, setConfirmation] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const mutationIntent = useRef<FleetMutationIntent | null>(null);
+  const confirmationPhrase = `adopt ${project.slug}/${reference || "reference"}`;
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setLoading(true);
+    setError(null);
+    try {
+      const input = {
+        name,
+        type,
+        isDefault: type === "prod" && isDefault,
+        deploymentUrl,
+        dashboardUrl,
+        operatorUrl,
+        databaseBindingAlias,
+        ...(reference ? { reference } : {}),
+        ...(hostId ? { hostId } : {}),
+        ...(siteUrl ? { siteUrl } : {}),
+      };
+      await adoptFleetDeployment(
+        project.slug,
+        input,
+        mutationIdempotencyKey(mutationIntent, {
+          projectSlug: project.slug,
+          input,
+        }),
+      );
+      onAdopted();
+    } catch (caught) {
+      setError(asError(caught).message);
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Modal
+      onClose={onClose}
+      title="Adopt existing deployment"
+      description={`Register externally owned runtime endpoints in ${project.name}.`}
+    >
+      <form className="flex flex-col gap-4 py-4" onSubmit={submit}>
+        <div className="rounded-xl border bg-background-primary p-4 text-sm">
+          <div className="font-medium">Registration only</div>
+          <p className="mt-1 text-xs/relaxed text-content-secondary">
+            Adoption does not provision, move, or take ownership of the runtime,
+            database, storage, DNS, or backups. Removing it later only
+            unregisters it from this fleet.
+          </p>
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <TextInput
+            id="fleet-adopt-name"
+            label="Deployment name"
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            autoFocus
+            required
+          />
+          <TextInput
+            id="fleet-adopt-reference"
+            label="Reference"
+            value={reference}
+            onChange={(event) => {
+              setReference(event.target.value);
+              setConfirmation("");
+            }}
+            description="A unique lowercase deployment reference."
+            required
+          />
+        </div>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <label className="flex flex-col gap-1 text-sm">
+            <span>Environment</span>
+            <select
+              className="min-h-9 rounded-md border bg-background-primary px-3 text-content-primary"
+              value={type}
+              onChange={(event) => {
+                const nextType = event.target.value as "dev" | "prod";
+                setType(nextType);
+                if (nextType === "dev") setIsDefault(false);
+              }}
+            >
+              <option value="dev">Development</option>
+              <option value="prod">Production</option>
+            </select>
+          </label>
+          <TextInput
+            id="fleet-adopt-host"
+            label="Host ID (optional)"
+            value={hostId}
+            onChange={(event) => setHostId(event.target.value)}
+            description="Defaults to the primary fleet host."
+          />
+        </div>
+        {type === "prod" ? (
+          <label
+            htmlFor="fleet-adopt-default"
+            className="flex items-start gap-3 rounded-xl border bg-background-primary p-3 text-sm"
+          >
+            <input
+              id="fleet-adopt-default"
+              aria-label="Default production deployment"
+              type="checkbox"
+              checked={isDefault}
+              onChange={(event) => setIsDefault(event.target.checked)}
+              className="mt-0.5"
+            />
+            <span>
+              <span className="block font-medium">
+                Default production deployment
+              </span>
+              <span className="block text-xs text-content-secondary">
+                Only enable this when the project has no other default
+                production target.
+              </span>
+            </span>
+          </label>
+        ) : null}
+        <div className="grid gap-4 sm:grid-cols-2">
+          <TextInput
+            id="fleet-adopt-deployment-url"
+            label="Convex API URL"
+            value={deploymentUrl}
+            onChange={(event) => setDeploymentUrl(event.target.value)}
+            placeholder="https://convex.example.com"
+            autoCapitalize="none"
+            spellCheck={false}
+            required
+          />
+          <TextInput
+            id="fleet-adopt-site-url"
+            label="HTTP actions URL (optional)"
+            value={siteUrl}
+            onChange={(event) => setSiteUrl(event.target.value)}
+            placeholder="https://http.example.com"
+            autoCapitalize="none"
+            spellCheck={false}
+          />
+          <TextInput
+            id="fleet-adopt-dashboard-url"
+            label="Dashboard URL"
+            value={dashboardUrl}
+            onChange={(event) => setDashboardUrl(event.target.value)}
+            placeholder="https://dashboard.example.com"
+            autoCapitalize="none"
+            spellCheck={false}
+            required
+          />
+          <TextInput
+            id="fleet-adopt-operator-url"
+            label="Private operator URL"
+            value={operatorUrl}
+            onChange={(event) => setOperatorUrl(event.target.value)}
+            placeholder="http://operator:7790"
+            autoCapitalize="none"
+            spellCheck={false}
+            required
+          />
+        </div>
+        <TextInput
+          id="fleet-adopt-database-binding"
+          label="Database backup binding"
+          value={databaseBindingAlias}
+          onChange={(event) => setDatabaseBindingAlias(event.target.value)}
+          description="Must already exist in the root-only Databasus binding registry."
+          placeholder="example-production"
+          autoCapitalize="none"
+          spellCheck={false}
+          required
+        />
+        <ConfirmationPhrase value={confirmationPhrase} />
+        <TextInput
+          id="fleet-adopt-confirmation"
+          label="Confirmation"
+          value={confirmation}
+          onChange={(event) => setConfirmation(event.target.value)}
+          autoComplete="off"
+        />
+        {error ? (
+          <p role="alert" className="text-sm text-content-errorSecondary">
+            {error}
+          </p>
+        ) : null}
+        <div className="flex justify-end gap-2">
+          <Button variant="neutral" onClick={onClose} disabled={loading}>
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            loading={loading}
+            disabled={
+              !name.trim() ||
+              !reference.trim() ||
+              !deploymentUrl.trim() ||
+              !dashboardUrl.trim() ||
+              !operatorUrl.trim() ||
+              !databaseBindingAlias.trim() ||
+              confirmation !== confirmationPhrase
+            }
+          >
+            Register external deployment
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+export function ReconfigureDomainsModal({
+  deployment,
+  onClose,
+  onQueued,
+}: {
+  deployment: FleetDeployment;
+  onClose(): void;
+  onQueued(): void;
+}) {
+  const [applicationDomain, setApplicationDomain] = useState(
+    deployment.desiredPolicy.applicationDomain ?? "",
+  );
+  const [deploymentDomain, setDeploymentDomain] = useState(
+    deployment.desiredPolicy.deploymentDomain ?? "",
+  );
+  const [siteDomain, setSiteDomain] = useState(
+    deployment.desiredPolicy.siteDomain ?? "",
+  );
+  const [confirmation, setConfirmation] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const mutationIntent = useRef<FleetMutationIntent | null>(null);
+  const confirmationPhrase = `change domains ${deployment.projectSlug}/${deployment.reference}`;
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setLoading(true);
+    setError(null);
+    try {
+      const input = {
+        applicationDomain,
+        deploymentDomain,
+        siteDomain,
+        confirmation: confirmationPhrase,
+      };
+      await reconfigureFleetDeploymentDomains(
+        deployment.id,
+        input,
+        mutationIdempotencyKey(mutationIntent, {
+          deploymentId: deployment.id,
+          input,
+        }),
+      );
+      onQueued();
+    } catch (caught) {
+      setError(asError(caught).message);
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Modal
+      onClose={onClose}
+      title="Change deployment domains"
+      description={`Queue a bounded routing and runtime reconfiguration for ${deployment.name}.`}
+    >
+      <form className="flex flex-col gap-4 py-4" onSubmit={submit}>
+        <div className="rounded-xl border bg-background-primary p-4 text-sm">
+          <div className="font-medium">
+            Delivered-path verification required
+          </div>
+          <p className="mt-1 text-xs/relaxed text-content-secondary">
+            The deployment temporarily leaves the ready state while DNS, TLS,
+            runtime configuration, dashboard access, and realtime traffic are
+            reconciled. This does not run application migrations.
+          </p>
+        </div>
+        <TextInput
+          id="fleet-domain-application"
+          label="Application domain"
+          value={applicationDomain}
+          onChange={(event) => setApplicationDomain(event.target.value)}
+          description="The trusted application origin used for audited impersonation handoffs."
+          placeholder="app.example.com"
+          autoCapitalize="none"
+          spellCheck={false}
+          required
+        />
+        <div className="grid gap-4 sm:grid-cols-2">
+          <TextInput
+            id="fleet-domain-deployment"
+            label="Convex API domain"
+            value={deploymentDomain}
+            onChange={(event) => setDeploymentDomain(event.target.value)}
+            placeholder="convex.example.com"
+            autoCapitalize="none"
+            spellCheck={false}
+            required
+          />
+          <TextInput
+            id="fleet-domain-site"
+            label="HTTP actions domain"
+            value={siteDomain}
+            onChange={(event) => setSiteDomain(event.target.value)}
+            placeholder="http.example.com"
+            autoCapitalize="none"
+            spellCheck={false}
+            required
+          />
+        </div>
+        <ConfirmationPhrase value={confirmationPhrase} />
+        <TextInput
+          id="fleet-domain-confirmation"
+          label="Confirmation"
+          value={confirmation}
+          onChange={(event) => setConfirmation(event.target.value)}
+          autoComplete="off"
+        />
+        {error ? (
+          <p role="alert" className="text-sm text-content-errorSecondary">
+            {error}
+          </p>
+        ) : null}
+        <div className="flex justify-end gap-2">
+          <Button variant="neutral" onClick={onClose} disabled={loading}>
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            loading={loading}
+            disabled={
+              !applicationDomain.trim() ||
+              !deploymentDomain.trim() ||
+              !siteDomain.trim() ||
+              !domainsAreDistinct(
+                applicationDomain,
+                deploymentDomain,
+                siteDomain,
+              ) ||
+              confirmation !== confirmationPhrase
+            }
+          >
+            Queue domain change
           </Button>
         </div>
       </form>
@@ -935,13 +1373,14 @@ function CloneDeploymentModal({
   const [isDefault, setIsDefault] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const mutationIntent = useRef<FleetMutationIntent | null>(null);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     setLoading(true);
     setError(null);
     try {
-      await cloneFleetDeployment(deployment.id, {
+      const input = {
         projectSlug,
         name,
         reference,
@@ -949,7 +1388,15 @@ function CloneDeploymentModal({
         siteDomain,
         ...(applicationDomain ? { applicationDomain } : {}),
         isDefault: deployment.type === "prod" && isDefault,
-      });
+      };
+      await cloneFleetDeployment(
+        deployment.id,
+        input,
+        mutationIdempotencyKey(mutationIntent, {
+          sourceDeploymentId: deployment.id,
+          input,
+        }),
+      );
       onCreated(projectSlug);
     } catch (caught) {
       setError(asError(caught).message);
@@ -1085,7 +1532,11 @@ function CloneDeploymentModal({
               !reference.trim() ||
               !deploymentDomain.trim() ||
               !siteDomain.trim() ||
-              deploymentDomain.trim() === siteDomain.trim()
+              !domainsAreDistinct(
+                deploymentDomain,
+                siteDomain,
+                applicationDomain,
+              )
             }
           >
             Clone as new instance
@@ -1110,13 +1561,21 @@ function DeleteDeploymentModal({
   const [confirmation, setConfirmation] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const mutationIntent = useRef<FleetMutationIntent | null>(null);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     setLoading(true);
     setError(null);
     try {
-      await deleteFleetDeployment(deployment.id, confirmation);
+      await deleteFleetDeployment(
+        deployment.id,
+        confirmation,
+        mutationIdempotencyKey(mutationIntent, {
+          deploymentId: deployment.id,
+          confirmation,
+        }),
+      );
       onDeleted();
     } catch (caught) {
       setError(asError(caught).message);
@@ -1170,18 +1629,14 @@ function DeleteDeploymentModal({
         </div>
         {!adopted ? (
           <p className="text-sm/relaxed text-content-secondary">
-            No backup is created automatically. Retention locks can pause
-            deletion until protected objects expire; a failed teardown remains
-            resumable from its last completed step.
+            Managed deletion waits for its required final database backup before
+            removing the database and then disables that backup schedule.
+            Retention locks can pause deletion until protected objects expire; a
+            failed teardown remains resumable from its last completed step.
           </p>
         ) : null}
         <div className="rounded-xl border bg-background-primary p-4">
-          <p className="text-sm text-content-secondary">
-            Copy and paste this exact text to confirm:
-          </p>
-          <code className="mt-2 block rounded-md bg-background-tertiary px-3 py-2 text-sm font-semibold text-content-primary select-all">
-            {confirmationPhrase}
-          </code>
+          <ConfirmationPhrase value={confirmationPhrase} />
           <div className="mt-4">
             <TextInput
               id="fleet-delete-confirmation"
@@ -1231,13 +1686,21 @@ function DeleteProjectModal({
   const [confirmation, setConfirmation] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const mutationIntent = useRef<FleetMutationIntent | null>(null);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
     setLoading(true);
     setError(null);
     try {
-      await deleteFleetProject(project.slug, confirmation);
+      await deleteFleetProject(
+        project.slug,
+        confirmation,
+        mutationIdempotencyKey(mutationIntent, {
+          projectSlug: project.slug,
+          confirmation,
+        }),
+      );
       onDeleted();
     } catch (caught) {
       setError(asError(caught).message);
@@ -1263,18 +1726,14 @@ function DeleteProjectModal({
                 Only a project with no active deployments can be deleted. No
                 runtime, PostgreSQL database, R2 bucket, or DNS record is
                 removed by this action. Historical records for deployments
-                already deleted remain available for auditing.
+                already deleted remain available for auditing, but the project
+                slug is released for future projects.
               </p>
             </div>
           </div>
         </div>
         <div className="rounded-xl border bg-background-primary p-4">
-          <p className="text-sm text-content-secondary">
-            Copy and paste this exact text to confirm:
-          </p>
-          <code className="mt-2 block rounded-md bg-background-tertiary px-3 py-2 text-sm font-semibold text-content-primary select-all">
-            {confirmationPhrase}
-          </code>
+          <ConfirmationPhrase value={confirmationPhrase} />
           <div className="mt-4">
             <TextInput
               id="fleet-delete-project-confirmation"
@@ -1318,6 +1777,38 @@ function FleetHealthOverview({
   deployments: FleetDeployment[];
   health: Record<string, FleetDeploymentHealth>;
 }) {
+  const { critical, attention, healthy, unknown, overall, overallLabel } =
+    fleetHealthSummary(deployments, health);
+  return (
+    <section
+      className="mb-8 overflow-hidden rounded-2xl border bg-background-secondary shadow-sm"
+      aria-label="Fleet health"
+    >
+      <div className="flex flex-wrap items-center justify-between gap-4 p-5">
+        <div className="min-w-0">
+          <div className="text-[11px] font-semibold tracking-[0.18em] text-content-tertiary uppercase">
+            Overall health
+          </div>
+          <HealthSignal level={overall} label={overallLabel} className="mt-2" />
+          <p className="mt-2 text-xs text-content-secondary">
+            Serving path only · production actions appear on each deployment.
+          </p>
+        </div>
+        <div className="grid grid-cols-2 gap-2 text-center sm:grid-cols-4">
+          <FleetCount value={healthy} label="Healthy" level="healthy" />
+          <FleetCount value={attention} label="Degraded" level="attention" />
+          <FleetCount value={critical} label="Unavailable" level="critical" />
+          <FleetCount value={unknown} label="Unknown" level="unknown" />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+export function fleetHealthSummary(
+  deployments: FleetDeployment[],
+  health: Record<string, FleetDeploymentHealth>,
+) {
   const levels = deployments.map((deployment) =>
     deploymentHealthLevel(deployment, health[deployment.id]),
   );
@@ -1325,51 +1816,27 @@ function FleetHealthOverview({
   const attention = levels.filter((level) => level === "attention").length;
   const healthy = levels.filter((level) => level === "healthy").length;
   const unknown = levels.filter((level) => level === "unknown").length;
-  const overall: SignalLevel = critical
-    ? "critical"
-    : attention
-    ? "attention"
-    : unknown
-    ? "unknown"
-    : "healthy";
+  const overall: SignalLevel =
+    deployments.length === 0
+      ? "unknown"
+      : critical
+        ? "critical"
+        : attention
+          ? "attention"
+          : unknown
+            ? "unknown"
+            : "healthy";
   const overallLabel =
-    overall === "healthy"
-      ? "Fleet healthy"
-      : overall === "critical"
-      ? `${critical} unavailable`
-      : overall === "attention"
-      ? `${attention} degraded`
-      : `${unknown} unknown`;
-  return (
-    <section
-      className="mb-8 overflow-hidden rounded-2xl border bg-background-secondary shadow-sm"
-      aria-label="Fleet health"
-    >
-      <div className="flex flex-wrap items-start justify-between gap-4 p-5">
-        <div>
-          <div className="text-[11px] font-semibold tracking-[0.18em] text-content-tertiary uppercase">
-            Overall health
-          </div>
-          <HealthSignal level={overall} label={overallLabel} className="mt-2" />
-          <p className="mt-2 max-w-2xl text-sm text-content-secondary">
-            Instance health covers the active runtime, PostgreSQL, and object
-            storage. Backups, recovery, security verification, credentials, and
-            alert delivery are tracked separately and do not downgrade a working
-            instance.
-          </p>
-        </div>
-        <div className="grid grid-cols-4 gap-2 text-center">
-          <FleetCount value={healthy} label="Healthy" level="healthy" />
-          <FleetCount value={attention} label="Degraded" level="attention" />
-          <FleetCount value={critical} label="Unavailable" level="critical" />
-          <FleetCount value={unknown} label="Unknown" level="unknown" />
-        </div>
-      </div>
-      <div className="border-t bg-background-primary/50 px-5 py-3">
-        <TrafficLightLegend />
-      </div>
-    </section>
-  );
+    deployments.length === 0
+      ? "No deployments to check"
+      : overall === "healthy"
+        ? "Fleet healthy"
+        : overall === "critical"
+          ? `${critical} unavailable`
+          : overall === "attention"
+            ? `${attention} degraded`
+            : `${unknown} unknown`;
+  return { critical, attention, healthy, unknown, overall, overallLabel };
 }
 
 function deploymentHealthLevel(
@@ -1418,12 +1885,12 @@ function deploymentSignals(
         deployment.state !== "ready"
           ? deployment.state
           : evidence?.error
-          ? "Health unknown"
-          : status?.freshness.state === "stale"
-          ? "Health unknown"
-          : status?.health.state === "unknown"
-          ? "Monitoring incomplete"
-          : status?.health.state ?? "Monitoring unavailable",
+            ? "Health unknown"
+            : status?.freshness.state === "stale"
+              ? "Health unknown"
+              : status?.health.state === "unknown"
+                ? "Monitoring incomplete"
+                : (status?.health.state ?? "Monitoring unavailable"),
       level: runtimeLevel,
     },
     {
@@ -1431,7 +1898,7 @@ function deploymentSignals(
       value:
         status?.providers.database.state === "unknown"
           ? "Probe unavailable"
-          : status?.providers.database.state ?? "Probe unavailable",
+          : (status?.providers.database.state ?? "Probe unavailable"),
       level: signalForState(status?.providers.database.state),
     },
     {
@@ -1439,7 +1906,7 @@ function deploymentSignals(
       value:
         status?.providers.objectStorage.state === "unknown"
           ? "Probe unavailable"
-          : status?.providers.objectStorage.state ?? "Probe unavailable",
+          : (status?.providers.objectStorage.state ?? "Probe unavailable"),
       level: signalForState(status?.providers.objectStorage.state),
     },
   ];
@@ -1458,16 +1925,16 @@ function deploymentOperationalSignals(
         scheduler?.state === "failed"
           ? "Failed"
           : status?.backups.lastSuccessful?.verified
-          ? "Verified"
-          : deployment.desiredPolicy.backupRequired
-          ? "Not verified"
-          : "Optional",
+            ? "Verified"
+            : deployment.desiredPolicy.backupRequired
+              ? "Not verified"
+              : "Optional",
       level:
         scheduler?.state === "failed"
           ? "critical"
           : status?.backups.lastSuccessful?.verified
-          ? "healthy"
-          : "unknown",
+            ? "healthy"
+            : "unknown",
     },
   ];
 }
@@ -1476,11 +1943,10 @@ type FleetOperationalItem = {
   title: string;
   detail: string;
   level: "attention" | "critical";
-  kind: "warning" | "recommendation";
   href?: string;
 };
 
-function deploymentOperationalItems(
+export function deploymentOperationalItems(
   deployment: FleetDeployment,
   evidence?: FleetDeploymentHealth,
 ): FleetOperationalItem[] {
@@ -1492,7 +1958,6 @@ function deploymentOperationalItems(
           deployment.failure?.message ??
           "Retry the failed operation after reviewing its current step.",
         level: "critical",
-        kind: "warning",
       },
     ];
   }
@@ -1505,7 +1970,6 @@ function deploymentOperationalItems(
           evidence?.error ??
           "The fleet manager could not retrieve this instance's health evidence.",
         level: "critical",
-        kind: "warning",
       },
     ];
   }
@@ -1513,24 +1977,16 @@ function deploymentOperationalItems(
   const status = evidence.status;
   const deploymentQuery = `deployment=${encodeURIComponent(deployment.id)}`;
   const issues: FleetOperationalItem[] = [];
-  if (status.freshness.state === "stale") {
+  if (
+    status.freshness.state === "stale" &&
+    status.freshness.ageSeconds > status.freshness.maxAgeSeconds * 2
+  ) {
     issues.push({
       title: "Health evidence is stale",
       detail: `The last evidence is ${Math.round(
         status.freshness.ageSeconds / 60,
       )} minutes old; inspect the instance status timer.`,
       level: "attention",
-      kind: "warning",
-    });
-  }
-  if (status.runtime.restartPending) {
-    issues.push({
-      title: "A configuration restart is pending",
-      detail:
-        "The current instance remains available, but saved runtime changes are not fully effective yet.",
-      level: "attention",
-      kind: "recommendation",
-      href: `/settings/runtime?${deploymentQuery}`,
     });
   }
   const scheduler = status.backups.scheduler;
@@ -1541,7 +1997,6 @@ function deploymentOperationalItems(
         scheduler.lastError ??
         "Review the scheduler and complete a verified manual backup.",
       level: "critical",
-      kind: "warning",
       href: `/settings/backups?${deploymentQuery}`,
     });
   } else if (
@@ -1553,7 +2008,6 @@ function deploymentOperationalItems(
       detail:
         "The instance is serving normally, but recovery is not protected by a verified archive yet.",
       level: "attention",
-      kind: "recommendation",
       href: `/settings/backups?${deploymentQuery}`,
     });
   }
@@ -1563,7 +2017,6 @@ function deploymentOperationalItems(
       detail:
         "The current runtime health is reported separately; review the failed release before retrying or rolling back.",
       level: "critical",
-      kind: "warning",
     });
   }
   if (
@@ -1571,23 +2024,10 @@ function deploymentOperationalItems(
     status.security.metricsPubliclyReachable === true
   ) {
     issues.push({
-      title: "Administrative surface is publicly reachable",
+      title: "Admin tools are open to the public internet",
       detail:
-        "Restrict dashboard and metrics ingress immediately, then rerun the independent exposure probe.",
+        "Block public access to the dashboard and monitoring data, then check them again from outside your network.",
       level: "critical",
-      kind: "warning",
-      href: `/settings/security?${deploymentQuery}`,
-    });
-  } else if (
-    status.security.publicAdminReachable === null ||
-    status.security.metricsPubliclyReachable === null
-  ) {
-    issues.push({
-      title: "External exposure is not independently verified",
-      detail:
-        "The instance is private by configuration, but no fresh off-host probe currently proves dashboard and metrics isolation.",
-      level: "attention",
-      kind: "recommendation",
       href: `/settings/security?${deploymentQuery}`,
     });
   }
@@ -1598,7 +2038,6 @@ function deploymentOperationalItems(
         status.alerts.reasons?.join(", ") ||
         "A configured operational threshold was crossed.",
       level: "critical",
-      kind: "warning",
       href: `/settings/alerts?${deploymentQuery}`,
     });
   } else if (status.alerts.state === "delivery_failed") {
@@ -1608,7 +2047,6 @@ function deploymentOperationalItems(
         status.alerts.lastError ??
         "Review the configured destination and send a test notification.",
       level: "critical",
-      kind: "warning",
       href: `/settings/alerts?${deploymentQuery}`,
     });
   } else if (
@@ -1620,57 +2058,37 @@ function deploymentOperationalItems(
       detail:
         "Fleet policy expects alerting, but this operator has no active delivery destination.",
       level: "attention",
-      kind: "recommendation",
       href: `/settings/alerts?${deploymentQuery}`,
     });
   }
-  if (
-    deployment.desiredPolicy.backupRequired &&
-    status.backups.restoreDrill.state !== "passed"
-  ) {
+  if (status.backups.restoreDrill.state === "failed") {
     issues.push({
-      title:
-        status.backups.restoreDrill.state === "failed"
-          ? "Restore drill failed"
-          : "Restore drill has not been proven",
+      title: "Restore drill failed",
       detail:
-        status.backups.restoreDrill.state === "failed"
-          ? "Inspect the isolated restore evidence before relying on this backup set."
-          : "Run an isolated restore drill to prove that documents and files can be recovered.",
-      level:
-        status.backups.restoreDrill.state === "failed"
-          ? "critical"
-          : "attention",
-      kind:
-        status.backups.restoreDrill.state === "failed"
-          ? "warning"
-          : "recommendation",
+        "Inspect the isolated restore evidence before relying on this backup set.",
+      level: "critical",
+      href: `/settings/backups?${deploymentQuery}`,
+    });
+  } else if (status.backups.restoreDrill.state !== "passed") {
+    issues.push({
+      title: "Complete an isolated restore drill",
+      detail:
+        "The verified backup has not yet been restored into a new empty deployment.",
+      level: "attention",
       href: `/settings/backups?${deploymentQuery}`,
     });
   }
   const overdueCredentials = status.security.credentials.filter(
     (credential) => credential.state === "overdue",
   );
-  const dueCredentials = status.security.credentials.filter(
-    (credential) => credential.state === "due",
-  );
-  if (overdueCredentials.length || dueCredentials.length) {
-    const affected = overdueCredentials.length
-      ? overdueCredentials
-      : dueCredentials;
+  if (overdueCredentials.length) {
+    const affected = overdueCredentials;
     issues.push({
-      title: overdueCredentials.length
-        ? "Credential rotation policy is overdue"
-        : "Credential rotation review recommended",
-      detail: overdueCredentials.length
-        ? `${affected.map((credential) => credential.kind).join(", ")} ${
-            affected.length === 1 ? "credential is" : "credentials are"
-          } outside the configured rotation window.`
-        : `Review the recorded age for ${affected
-            .map((credential) => credential.kind)
-            .join(", ")}; this does not affect current instance availability.`,
-      level: overdueCredentials.length ? "critical" : "attention",
-      kind: overdueCredentials.length ? "warning" : "recommendation",
+      title: "Credential rotation policy is overdue",
+      detail: `${affected.map((credential) => credential.kind).join(", ")} ${
+        affected.length === 1 ? "credential is" : "credentials are"
+      } outside the configured rotation window.`,
+      level: "critical",
       href: `/settings/security?${deploymentQuery}`,
     });
   }
@@ -1736,4 +2154,19 @@ function humanStep(value: string) {
 }
 function asError(value: unknown) {
   return value instanceof Error ? value : new Error(String(value));
+}
+
+function mutationIdempotencyKey(
+  reference: { current: FleetMutationIntent | null },
+  payload: unknown,
+) {
+  reference.current = resolveFleetMutationIntent(reference.current, payload);
+  return reference.current.idempotencyKey;
+}
+
+function domainsAreDistinct(...domains: string[]) {
+  const configured = domains
+    .map((domain) => domain.trim().toLowerCase())
+    .filter(Boolean);
+  return new Set(configured).size === configured.length;
 }

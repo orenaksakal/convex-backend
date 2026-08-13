@@ -15,6 +15,7 @@ import { useOperatorState } from "../../components/operator/useOperatorState";
 import {
   ExecutedOperatorAction,
   OperatorConfiguration,
+  OperatorStatus,
   PreparedOperatorAction,
   operatorMutation,
 } from "../../lib/operatorApi";
@@ -96,16 +97,17 @@ export default function ReleasesPage() {
     <DeploymentSettingsLayout page="releases">
       <div className="flex flex-col gap-6">
         <header>
-          <h3 className="font-semibold">Releases and recovery</h3>
+          <h3 className="font-semibold">Backend updates</h3>
           <p className="mt-1 max-w-prose text-sm text-content-secondary">
-            Review immutable backend image targets, effective digests, rollback
-            evidence, and recovery prerequisites. Saving a target never deploys
-            it; release and rollback each require a fresh prepared confirmation.
+            Choose which backend version to deploy or return to a previous
+            version. Saving a version does not change the running deployment;
+            starting an update or rollback always requires a separate
+            confirmation.
           </p>
         </header>
 
         {operator.loading && (
-          <OperatorLoading detail="Waiting for release, backup, and rollback evidence." />
+          <OperatorLoading detail="Checking the running version, rollback version, and latest backup." />
         )}
         {operator.error && (
           <OperatorError error={operator.error} onRetry={operator.refresh} />
@@ -121,9 +123,9 @@ export default function ReleasesPage() {
         )}
         {accepted && (
           <Callout variant="success">
-            {accepted.kind} action <code>{accepted.actionId}</code> was accepted
-            at {formatOperatorDate(accepted.acceptedAt)}. Refresh to observe
-            convergence.
+            The {accepted.kind === "release" ? "update" : "rollback"} request
+            was accepted at {formatOperatorDate(accepted.acceptedAt)}. Refresh
+            to see when it finishes.
           </Callout>
         )}
 
@@ -137,12 +139,14 @@ export default function ReleasesPage() {
                 aria-label="Release evidence"
               >
                 <EvidenceCard
-                  label="Release state"
-                  value={status?.release.state ?? "Unavailable"}
+                  label="Update status"
+                  value={releaseStateLabel(status?.release.state)}
                   detail={
                     status
-                      ? `Evidence ${status.freshness.state} · ${formatOperatorDate(status.generatedAt)}`
-                      : "No validated status provider"
+                      ? status.freshness.state === "current"
+                        ? `Last checked ${formatOperatorDate(status.generatedAt)}`
+                        : `Status may be out of date · last checked ${formatOperatorDate(status.generatedAt)}`
+                      : "Could not check the deployment"
                   }
                   warning={
                     !status ||
@@ -327,6 +331,17 @@ export default function ReleasesPage() {
       </div>
     </DeploymentSettingsLayout>
   );
+}
+
+function releaseStateLabel(
+  state: OperatorStatus["release"]["state"] | undefined,
+) {
+  if (state === "idle") return "No update in progress";
+  if (state === "preflight") return "Checking update safety";
+  if (state === "canary") return "Installing the update";
+  if (state === "rolling_back") return "Returning to the previous version";
+  if (state === "failed") return "Last update failed";
+  return "Status unavailable";
 }
 
 function validateRelease(form: ReleaseForm | null) {

@@ -9,7 +9,7 @@ export const operatorInputClasses =
 
 export function OperatorLoading({ detail }: { detail: string }) {
   return (
-    <div className="rounded-lg border bg-background-secondary p-4">
+    <div className="min-w-0 rounded-lg border bg-background-secondary p-4">
       <div className="font-medium">Loading operator state</div>
       <div className="text-sm text-content-secondary">{detail}</div>
     </div>
@@ -61,7 +61,9 @@ export function EvidenceCard({
   const inferred = signalForState(value);
   const level =
     signal ??
-    (warning
+    (inferred === "unknown"
+      ? "unknown"
+      : warning
       ? inferred === "critical"
         ? "critical"
         : "attention"
@@ -74,9 +76,11 @@ export function EvidenceCard({
       {level ? (
         <HealthSignal level={level} label={value} className="mt-2" />
       ) : (
-        <div className="mt-1 font-semibold">{value}</div>
+        <div className="mt-1 font-semibold wrap-break-word">{value}</div>
       )}
-      <div className="mt-1 text-xs text-content-secondary">{detail}</div>
+      <div className="mt-1 text-xs wrap-break-word text-content-secondary">
+        {detail}
+      </div>
     </div>
   );
 }
@@ -145,7 +149,7 @@ export function OperatorTextPresetField({
               return;
             }
             const preset = presets.find(
-              (candidate) => presetKey(candidate.value) === event.target.value,
+              (candidate) => presetKey(candidate.value) === event.target.value
             );
             if (preset) {
               setCustomSelected(false);
@@ -209,7 +213,9 @@ export function OperatorNumberPresetField({
   const match = presets.find((preset) => preset.value === value);
   const isCustom = customSelected || !match;
   const selectedDescription = isCustom
-    ? `Enter a whole number${min === undefined ? "" : ` from ${formatValue(min)}`}${max === undefined ? "" : ` to ${formatValue(max)}`}.`
+    ? `Enter a whole number${
+        min === undefined ? "" : ` from ${formatValue(min)}`
+      }${max === undefined ? "" : ` to ${formatValue(max)}`}.`
     : match.description;
   return (
     <OperatorField label={label} description={description}>
@@ -223,7 +229,7 @@ export function OperatorNumberPresetField({
               return;
             }
             const preset = presets.find(
-              (candidate) => presetKey(candidate.value) === event.target.value,
+              (candidate) => presetKey(candidate.value) === event.target.value
             );
             if (preset) {
               setCustomSelected(false);
@@ -251,7 +257,7 @@ export function OperatorNumberPresetField({
             value={value ?? ""}
             onChange={(event) =>
               onChange(
-                event.target.value === "" ? null : Number(event.target.value),
+                event.target.value === "" ? null : Number(event.target.value)
               )
             }
             aria-label={`${label} custom value`}

@@ -1,10 +1,11 @@
-import { useContext, useMemo, useState } from "react";
+import { useContext, useMemo, useRef, useState } from "react";
 import { useQuery } from "convex/react";
 import { DeploymentSettingsLayout } from "@common/layouts/DeploymentSettingsLayout";
 import { DeploymentInfoContext } from "@common/lib/deploymentContext";
 import udfs from "@common/udfs";
 import { Button } from "@ui/Button";
 import { Callout } from "@ui/Callout";
+import { ConfirmationPhrase } from "../../components/operator/ConfirmationPhrase";
 import {
   OperatorField,
   operatorInputClasses,
@@ -15,6 +16,14 @@ import { useBackendCapabilities } from "../../lib/backendCapabilities";
 const IMPORT_CHUNK_SIZE = 5 * 1024 * 1024;
 
 export default function SnapshotsPage() {
+  return (
+    <DeploymentSettingsLayout page="backups">
+      <SnapshotTools />
+    </DeploymentSettingsLayout>
+  );
+}
+
+export function SnapshotTools() {
   const deployment = useContext(DeploymentInfoContext);
   const exports = useQuery(udfs.latestExport.list) ?? [];
   const imports = useQuery(udfs.snapshotImport.list) ?? [];
@@ -33,6 +42,10 @@ export default function SnapshotsPage() {
   const [confirmation, setConfirmation] = useState("");
   const [repairReport, setRepairReport] = useState<unknown>(null);
   const [repairConfirmation, setRepairConfirmation] = useState("");
+  const [repairing, setRepairing] = useState<"dry-run" | "execute" | null>(
+    null,
+  );
+  const repairInFlightRef = useRef(false);
   const [error, setError] = useState<Error | null>(null);
   const backendCapabilities = useBackendCapabilities();
 
@@ -129,7 +142,9 @@ export default function SnapshotsPage() {
         }
         const uploaded = await deploymentFetch(
           deployment,
-          `/api/import/upload_part?uploadToken=${encodeURIComponent(uploadToken)}&partNumber=${partNumber}`,
+          `/api/import/upload_part?uploadToken=${encodeURIComponent(
+            uploadToken,
+          )}&partNumber=${partNumber}`,
           {
             method: "POST",
             headers: { "Content-Type": "application/octet-stream" },
@@ -205,9 +220,12 @@ export default function SnapshotsPage() {
     if (
       !canOperate ||
       !failedImport ||
+      repairInFlightRef.current ||
       (execute && repairConfirmation !== repairPhrase)
     )
       return;
+    repairInFlightRef.current = true;
+    setRepairing(execute ? "execute" : "dry-run");
     setError(null);
     try {
       const response = await deploymentFetch(
@@ -222,272 +240,288 @@ export default function SnapshotsPage() {
       if (execute) setRepairConfirmation("");
     } catch (requestError) {
       setError(asError(requestError));
+    } finally {
+      repairInFlightRef.current = false;
+      setRepairing(null);
     }
   }
 
   return (
-    <DeploymentSettingsLayout page="snapshots">
-      <div className="flex flex-col gap-6">
-        <header>
-          <h3 className="font-semibold">Snapshot import and export</h3>
-          <p className="mt-1 max-w-prose text-sm text-content-secondary">
-            Create deployment-local ZIP snapshots, optionally including file
-            storage, and import snapshots with explicit replace-all review.
-            Logical backups and isolated disaster recovery remain on Backup &
-            Restore.
-          </p>
-        </header>
+    <div className="flex flex-col gap-6 border-t pt-6">
+      <header>
+        <h3 className="font-semibold">Imports and exports</h3>
+        <p className="mt-1 max-w-prose text-sm text-content-secondary">
+          Create deployment-local ZIP snapshots, optionally including file
+          storage, or import snapshots with explicit replace-all review. These
+          tools live with scheduled backups and restore operations so every
+          recovery workflow has one home.
+        </p>
+      </header>
 
-        {error && (
-          <Callout variant="error">
-            <div>
-              <div className="font-medium">Snapshot operation failed.</div>
-              <div>{error.message}</div>
-            </div>
-          </Callout>
-        )}
-
-        <section
-          className="rounded-lg border bg-background-secondary p-4"
-          aria-labelledby="snapshot-export-title"
-        >
-          <h4 id="snapshot-export-title" className="font-semibold">
-            Exports
-          </h4>
-          <label className="mt-3 flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={includeStorage}
-              onChange={(event) => setIncludeStorage(event.target.checked)}
-            />
-            Include file storage
-          </label>
-          <Button
-            className="mt-3"
-            onClick={() => void requestExport()}
-            loading={exporting}
-            disabled={
-              !canOperate ||
-              exports.some(
-                (item) =>
-                  item.state === "requested" || item.state === "in_progress",
-              )
-            }
-          >
-            Create snapshot export
-          </Button>
-
-          <div className="mt-4 overflow-hidden rounded-md border">
-            {exports.length === 0 ? (
-              <div className="p-3 text-sm text-content-secondary">
-                No snapshot export history.
-              </div>
-            ) : (
-              exports.map((item) => (
-                <div
-                  key={item._id}
-                  className="flex flex-col gap-2 border-b p-3 last:border-b-0 sm:flex-row sm:items-center sm:justify-between"
-                >
-                  <div className="min-w-0 text-sm">
-                    <div className="font-medium">
-                      {item.state.replaceAll("_", " ")}
-                    </div>
-                    <div className="text-xs text-content-secondary">
-                      Requested {new Date(item._creationTime).toLocaleString()}{" "}
-                      · ID <code>{item._id}</code>
-                      {item.state === "completed"
-                        ? ` · expires ${timestampNanos(item.expiration_ts)}`
-                        : ""}
-                    </div>
-                    {downloadChecksums[item._id] && (
-                      <div className="mt-1 text-xs text-content-secondary">
-                        Download verified locally:{" "}
-                        <code className="break-all">
-                          sha256:{downloadChecksums[item._id].sha256}
-                        </code>{" "}
-                        · {formatBytes(downloadChecksums[item._id].sizeBytes)}
-                      </div>
-                    )}
-                  </div>
-                  <div className="flex gap-2">
-                    {item.state === "completed" && (
-                      <Button
-                        size="xs"
-                        variant="neutral"
-                        loading={downloading === item._id}
-                        onClick={() =>
-                          void downloadExport(item._id, item.start_ts)
-                        }
-                      >
-                        Download
-                      </Button>
-                    )}
-                    {(item.state === "requested" ||
-                      item.state === "in_progress") && (
-                      <Button
-                        size="xs"
-                        variant="danger"
-                        onClick={() => void cancelExport(item._id)}
-                      >
-                        Cancel
-                      </Button>
-                    )}
-                  </div>
-                </div>
-              ))
-            )}
+      {error && (
+        <Callout variant="error">
+          <div>
+            <div className="font-medium">Snapshot operation failed.</div>
+            <div>{error.message}</div>
           </div>
-        </section>
+        </Callout>
+      )}
 
-        <section
-          className="rounded-lg border bg-background-secondary p-4"
-          aria-labelledby="snapshot-import-title"
+      <section
+        className="rounded-lg border bg-background-secondary p-4"
+        aria-labelledby="snapshot-export-title"
+      >
+        <h4 id="snapshot-export-title" className="font-semibold">
+          Exports
+        </h4>
+        <label className="mt-3 flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={includeStorage}
+            onChange={(event) => setIncludeStorage(event.target.checked)}
+          />
+          Include file storage
+        </label>
+        <Button
+          className="mt-3"
+          onClick={() => void requestExport()}
+          loading={exporting}
+          disabled={
+            !canOperate ||
+            exports.some(
+              (item) =>
+                item.state === "requested" || item.state === "in_progress",
+            )
+          }
         >
-          <h4 id="snapshot-import-title" className="font-semibold">
-            Import a ZIP snapshot
-          </h4>
-          <p className="mt-1 text-sm text-content-secondary">
-            Uploads use bounded multipart chunks. The backend parses first and
-            requires a second confirmation before writing.
-          </p>
-          <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            <OperatorField
-              label="Snapshot ZIP"
-              description="A Convex ZIP archive export. Table-level comma-separated value (CSV) and JavaScript Object Notation (JSON) imports remain available through the command-line interface (CLI)."
+          Create snapshot export
+        </Button>
+
+        <div className="mt-4 overflow-hidden rounded-md border">
+          {exports.length === 0 ? (
+            <div className="p-3 text-sm text-content-secondary">
+              No snapshot export history.
+            </div>
+          ) : (
+            exports.map((item) => (
+              <div
+                key={item._id}
+                className="flex flex-col gap-2 border-b p-3 last:border-b-0 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <div className="min-w-0 text-sm">
+                  <div className="font-medium">
+                    {item.state.replaceAll("_", " ")}
+                  </div>
+                  <div className="text-xs text-content-secondary">
+                    Requested {new Date(item._creationTime).toLocaleString()} ·
+                    ID <code>{item._id}</code>
+                    {item.state === "completed"
+                      ? ` · expires ${timestampNanos(item.expiration_ts)}`
+                      : ""}
+                  </div>
+                  {downloadChecksums[item._id] && (
+                    <div className="mt-1 text-xs text-content-secondary">
+                      Download verified locally:{" "}
+                      <code className="break-all">
+                        sha256:{downloadChecksums[item._id].sha256}
+                      </code>{" "}
+                      · {formatBytes(downloadChecksums[item._id].sizeBytes)}
+                    </div>
+                  )}
+                </div>
+                <div className="flex gap-2">
+                  {item.state === "completed" && (
+                    <Button
+                      size="xs"
+                      variant="neutral"
+                      loading={downloading === item._id}
+                      onClick={() =>
+                        void downloadExport(item._id, item.start_ts)
+                      }
+                    >
+                      Download
+                    </Button>
+                  )}
+                  {(item.state === "requested" ||
+                    item.state === "in_progress") && (
+                    <Button
+                      size="xs"
+                      variant="danger"
+                      onClick={() => void cancelExport(item._id)}
+                    >
+                      Cancel
+                    </Button>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </section>
+
+      <section
+        className="rounded-lg border bg-background-secondary p-4"
+        aria-labelledby="snapshot-import-title"
+      >
+        <h4 id="snapshot-import-title" className="font-semibold">
+          Import a ZIP snapshot
+        </h4>
+        <p className="mt-1 text-sm text-content-secondary">
+          Uploads use bounded multipart chunks. The backend parses first and
+          requires a second confirmation before writing.
+        </p>
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          <OperatorField
+            label="Snapshot ZIP"
+            description="A Convex ZIP archive export. Table-level comma-separated value (CSV) and JavaScript Object Notation (JSON) imports remain available through the command-line interface (CLI)."
+          >
+            <input
+              className={operatorInputClasses}
+              type="file"
+              accept=".zip,application/zip"
+              onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+            />
+          </OperatorField>
+          <OperatorField
+            label="Import mode"
+            description="Require empty is safest; replace all is destructive and requires backend confirmation."
+          >
+            <select
+              className={operatorInputClasses}
+              value={mode}
+              onChange={(event) => setMode(event.target.value as typeof mode)}
             >
+              <option value="requireEmpty">Require empty deployment</option>
+              <option value="replaceAll">Replace all tables</option>
+            </select>
+          </OperatorField>
+        </div>
+        {uploading && (
+          <div className="mt-3 text-sm">Upload progress: {uploadProgress}%</div>
+        )}
+        <div className="mt-3 flex gap-2">
+          <Button
+            onClick={() => void uploadSnapshot()}
+            loading={uploading}
+            disabled={!file || !!activeImport}
+          >
+            Upload and parse snapshot
+          </Button>
+          {activeImport && (
+            <Button variant="danger" onClick={() => void cancelImport()}>
+              Cancel active import
+            </Button>
+          )}
+        </div>
+
+        {activeImport?.state.state === "waiting_for_confirmation" && (
+          <div className="mt-4 rounded-md border border-content-error bg-background-primary p-3 text-sm">
+            <div className="font-medium">Backend confirmation required</div>
+            <pre className="mt-2 scrollbar max-h-64 overflow-auto rounded-sm bg-background-tertiary p-3 text-xs whitespace-pre-wrap">
+              {activeImport.state.message_to_confirm}
+            </pre>
+            <ConfirmationPhrase className="mt-3" value={importConfirmation} />
+            <label className="mt-3 flex flex-col gap-1">
+              Paste confirmation text
               <input
                 className={operatorInputClasses}
-                type="file"
-                accept=".zip,application/zip"
-                onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+                value={confirmation}
+                onChange={(event) => setConfirmation(event.target.value)}
+                autoComplete="off"
               />
-            </OperatorField>
-            <OperatorField
-              label="Import mode"
-              description="Require empty is safest; replace all is destructive and requires backend confirmation."
-            >
-              <select
-                className={operatorInputClasses}
-                value={mode}
-                onChange={(event) => setMode(event.target.value as typeof mode)}
-              >
-                <option value="requireEmpty">Require empty deployment</option>
-                <option value="replaceAll">Replace all tables</option>
-              </select>
-            </OperatorField>
-          </div>
-          {uploading && (
-            <div className="mt-3 text-sm">
-              Upload progress: {uploadProgress}%
-            </div>
-          )}
-          <div className="mt-3 flex gap-2">
+            </label>
             <Button
-              onClick={() => void uploadSnapshot()}
-              loading={uploading}
-              disabled={!file || !!activeImport}
+              className="mt-3"
+              variant="danger"
+              disabled={confirmation !== importConfirmation}
+              onClick={() => void confirmImport()}
             >
-              Upload and parse snapshot
+              Confirm exact import
             </Button>
-            {activeImport && (
-              <Button variant="danger" onClick={() => void cancelImport()}>
-                Cancel active import
-              </Button>
-            )}
           </div>
+        )}
 
-          {activeImport?.state.state === "waiting_for_confirmation" && (
-            <div className="mt-4 rounded-md border border-content-error bg-background-primary p-3 text-sm">
-              <div className="font-medium">Backend confirmation required</div>
-              <pre className="mt-2 scrollbar max-h-64 overflow-auto rounded-sm bg-background-tertiary p-3 text-xs whitespace-pre-wrap">
-                {activeImport.state.message_to_confirm}
-              </pre>
-              <label className="mt-3 flex flex-col gap-1">
-                Type <code>{importConfirmation}</code>
+        <ImportHistory imports={imports} />
+      </section>
+
+      {failedImport && (
+        <section
+          className="rounded-lg border bg-background-secondary p-4"
+          aria-labelledby="snapshot-repair-title"
+        >
+          <h4 id="snapshot-repair-title" className="font-semibold">
+            Failed replace-all checkpoint repair
+          </h4>
+          <p className="mt-1 text-sm text-content-secondary">
+            Break-glass recovery for import <code>{failedImport._id}</code>.
+            Always inspect a dry-run report first; backend drift and checkpoint
+            guards still apply.
+          </p>
+          <Button
+            className="mt-3"
+            variant="neutral"
+            disabled={repairing !== null}
+            loading={repairing === "dry-run"}
+            onClick={() => void repair(false)}
+          >
+            Run repair dry-run
+          </Button>
+          {repairReport !== null && (
+            <pre className="mt-3 scrollbar max-h-96 overflow-auto rounded-sm bg-background-tertiary p-3 text-xs">
+              {JSON.stringify(repairReport, null, 2)}
+            </pre>
+          )}
+          {repairReport !== null && (
+            <div className="mt-3 rounded-md border border-content-error p-3">
+              {!backendCapabilities.snapshotCheckpointRepairExecute && (
+                <Callout variant="instructions">
+                  Destructive checkpoint activation is disabled because its
+                  production fixture gate has not passed. Use the dry-run report
+                  to assess the failed import, then perform a clean re-import or
+                  complete the gated recovery procedure.
+                </Callout>
+              )}
+              <ConfirmationPhrase value={repairPhrase} />
+              <label className="flex flex-col gap-1 text-sm">
+                Paste confirmation text
                 <input
                   className={operatorInputClasses}
-                  value={confirmation}
-                  onChange={(event) => setConfirmation(event.target.value)}
+                  value={repairConfirmation}
+                  onChange={(event) =>
+                    setRepairConfirmation(event.target.value)
+                  }
                   autoComplete="off"
                 />
               </label>
               <Button
                 className="mt-3"
                 variant="danger"
-                disabled={confirmation !== importConfirmation}
-                onClick={() => void confirmImport()}
+                disabled={
+                  repairing !== null ||
+                  !backendCapabilities.snapshotCheckpointRepairExecute ||
+                  repairConfirmation !== repairPhrase
+                }
+                loading={repairing === "execute"}
+                onClick={() => void repair(true)}
               >
-                Confirm exact import
+                Execute checkpoint repair
               </Button>
             </div>
           )}
-
-          <ImportHistory imports={imports} />
-        </section>
-
-        {failedImport && (
-          <section
-            className="rounded-lg border bg-background-secondary p-4"
-            aria-labelledby="snapshot-repair-title"
-          >
-            <h4 id="snapshot-repair-title" className="font-semibold">
-              Failed replace-all checkpoint repair
-            </h4>
-            <p className="mt-1 text-sm text-content-secondary">
-              Break-glass recovery for import <code>{failedImport._id}</code>.
-              Always inspect a dry-run report first; backend drift and
-              checkpoint guards still apply.
-            </p>
-            <Button
-              className="mt-3"
-              variant="neutral"
-              onClick={() => void repair(false)}
+          {repairing !== null && (
+            <p
+              className="mt-3 text-sm text-content-secondary"
+              role="status"
+              aria-live="polite"
             >
-              Run repair dry-run
-            </Button>
-            {repairReport !== null && (
-              <pre className="mt-3 scrollbar max-h-96 overflow-auto rounded-sm bg-background-tertiary p-3 text-xs">
-                {JSON.stringify(repairReport, null, 2)}
-              </pre>
-            )}
-            {repairReport !== null && (
-              <div className="mt-3 rounded-md border border-content-error p-3">
-                {!backendCapabilities.snapshotCheckpointRepairExecute && (
-                  <Callout variant="instructions">
-                    Destructive checkpoint activation is disabled because its
-                    production fixture gate has not passed. Use the dry-run
-                    report to assess the failed import, then perform a clean
-                    re-import or complete the gated recovery procedure.
-                  </Callout>
-                )}
-                <label className="flex flex-col gap-1 text-sm">
-                  Type <code>{repairPhrase}</code>
-                  <input
-                    className={operatorInputClasses}
-                    value={repairConfirmation}
-                    onChange={(event) =>
-                      setRepairConfirmation(event.target.value)
-                    }
-                    autoComplete="off"
-                  />
-                </label>
-                <Button
-                  className="mt-3"
-                  variant="danger"
-                  disabled={
-                    !backendCapabilities.snapshotCheckpointRepairExecute ||
-                    repairConfirmation !== repairPhrase
-                  }
-                  onClick={() => void repair(true)}
-                >
-                  Execute checkpoint repair
-                </Button>
-              </div>
-            )}
-          </section>
-        )}
-      </div>
-    </DeploymentSettingsLayout>
+              {repairing === "dry-run"
+                ? "Checking checkpoint safety and building the repair report…"
+                : "Executing checkpoint repair and waiting for backend verification…"}
+            </p>
+          )}
+        </section>
+      )}
+    </div>
   );
 }
 
@@ -555,7 +589,9 @@ async function deploymentFetch(
   if (!response.ok) {
     const body = await response.text();
     throw new Error(
-      `Backend returned ${response.status} ${response.statusText}${body ? `: ${body.slice(0, 1000)}` : ""}`,
+      `Backend returned ${response.status} ${response.statusText}${
+        body ? `: ${body.slice(0, 1000)}` : ""
+      }`,
     );
   }
   return response;

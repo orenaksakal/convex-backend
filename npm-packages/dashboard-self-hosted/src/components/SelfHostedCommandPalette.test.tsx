@@ -11,6 +11,7 @@ jest.mock("next/router", () => ({
   useRouter: () => ({
     push: mockPush,
     events: mockEvents,
+    query: {},
   }),
 }));
 
@@ -18,6 +19,16 @@ beforeEach(() => {
   mockPush.mockClear();
   mockEvents.on.mockClear();
   mockEvents.off.mockClear();
+});
+
+test("keeps the navigation trigger available on narrow screens", () => {
+  render(<SelfHostedCommandPalette />);
+
+  const trigger = screen.getByRole("button", {
+    name: "Open deployment command palette",
+  });
+  expect(trigger).toHaveClass("flex");
+  expect(trigger).not.toHaveClass("hidden");
 });
 
 test("filters and navigates to the selected result with Enter", () => {
@@ -42,10 +53,9 @@ test("wraps arrow-key selection and navigates without executing an action", () =
   const input = screen.getByRole("combobox");
   fireEvent.keyDown(input, { key: "ArrowDown" });
 
-  expect(screen.getByRole("option", { name: "Data Deployment" })).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
+  expect(
+    screen.getByRole("option", { name: "Data Deployment" }),
+  ).toHaveAttribute("aria-selected", "true");
   fireEvent.keyDown(input, { key: "Enter" });
 
   expect(mockPush).toHaveBeenCalledWith("/data");

@@ -1,9 +1,11 @@
-import { useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { useCallback, useContext, useMemo, useRef, useState } from "react";
 import { Button } from "@ui/Button";
 import { Callout } from "@ui/Callout";
 import { DeploymentSettingsLayout } from "@common/layouts/DeploymentSettingsLayout";
 import { DeploymentInfoContext } from "@common/lib/deploymentContext";
 import { OperatorActionConfirmation } from "../../components/operator/OperatorActionConfirmation";
+import { OperatorResourceFreshness } from "../../components/operator/OperatorResourceFreshness";
+import { useOperatorResource } from "../../components/operator/useOperatorResource";
 import {
   HealthSignal,
   SignalLevel,
@@ -39,7 +41,6 @@ export default function RuntimeSettingsPage() {
   const deployment = useContext(DeploymentInfoContext);
   const [data, setData] = useState<RuntimeData | null>(null);
   const [proposed, setProposed] = useState<ProposedValues>({});
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [reviewing, setReviewing] = useState(false);
   const [error, setError] = useState<OperatorApiError | Error | null>(null);
@@ -54,62 +55,34 @@ export default function RuntimeSettingsPage() {
   const [runtimeMetrics, setRuntimeMetrics] = useState<RuntimeMetrics | null>(
     null,
   );
-  const [runtimeMetricsError, setRuntimeMetricsError] = useState<Error | null>(
-    null,
-  );
+  const proposedDirtyRef = useRef(false);
 
   const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const [configurationResponse, metadata] = await Promise.all([
-        operatorGet<{ configuration: OperatorConfiguration }>(
-          "/v1/configuration",
-        ),
-        operatorGet<OperatorMetadata>("/v1/metadata"),
-      ]);
-      const configuration = configurationResponse.configuration;
-      setData({ configuration, metadata, status: null });
+    const [configurationResponse, metadata] = await Promise.all([
+      operatorGet<{ configuration: OperatorConfiguration }>(
+        "/v1/configuration",
+      ),
+      operatorGet<OperatorMetadata>("/v1/metadata"),
+    ]);
+    const configuration = configurationResponse.configuration;
+    const status = metadata.capabilities.status.read
+      ? await operatorGet<{ status: OperatorStatus }>("/v1/status").then(
+          (response) => response.status,
+        )
+      : null;
+    setData({ configuration, metadata, status });
+    if (!proposedDirtyRef.current) {
       setProposed(toProposed(configuration.runtime.knobs));
-      setReviewing(false);
-      if (metadata.capabilities.status.read) {
-        try {
-          const response = await operatorGet<{ status: OperatorStatus }>(
-            "/v1/status",
-          );
-          setData({ configuration, metadata, status: response.status });
-        } catch (statusError) {
-          setError(asError(statusError));
-        }
-      }
-    } catch (requestError) {
-      setError(asError(requestError));
-    } finally {
-      setLoading(false);
     }
   }, []);
-
-  useEffect(() => {
-    void load();
-  }, [load]);
-
-  useEffect(() => {
+  const resource = useOperatorResource(load);
+  const loadMetrics = useCallback(async () => {
     if (!deployment.ok) return;
-    let cancelled = false;
-    void fetchRuntimeMetrics(deployment)
-      .then((metrics) => {
-        if (!cancelled) {
-          setRuntimeMetrics(metrics);
-          setRuntimeMetricsError(null);
-        }
-      })
-      .catch((metricsError: unknown) => {
-        if (!cancelled) setRuntimeMetricsError(asError(metricsError));
-      });
-    return () => {
-      cancelled = true;
-    };
+    setRuntimeMetrics(await fetchRuntimeMetrics(deployment));
   }, [deployment]);
+  const metricsResource = useOperatorResource(loadMetrics, {
+    enabled: deployment.ok,
+  });
 
   const changes = useMemo(() => {
     if (!data) return [];
@@ -129,6 +102,7 @@ export default function RuntimeSettingsPage() {
         validateProposed(name, proposed[name], definition),
     );
   }, [data, proposed]);
+  proposedDirtyRef.current = changes.length > 0;
 
   async function applyChanges() {
     if (!data || changes.length === 0 || validationIssues.length > 0) return;
@@ -157,7 +131,7 @@ export default function RuntimeSettingsPage() {
       const nextError = asError(requestError);
       setError(nextError);
       if (nextError instanceof OperatorApiError && nextError.status === 409) {
-        await load();
+        await resource.refresh();
       }
     } finally {
       setSaving(false);
@@ -188,28 +162,46 @@ export default function RuntimeSettingsPage() {
   return (
     <DeploymentSettingsLayout page="runtime">
       <div className="flex flex-col gap-6">
-        <header className="flex flex-col gap-1">
-          <h3 className="font-semibold">Runtime capacity</h3>
-          <p className="max-w-prose text-sm text-content-secondary">
-            Review declared and effective values for this instance. Changes are
-            revision-checked and do not restart the backend automatically.
-          </p>
+        <header className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="font-semibold">Runtime limits</h3>
+            <p className="max-w-prose text-sm text-content-secondary">
+              See the limits the backend is using. Editing a value does nothing
+              until you save it, and saved runtime changes require a separately
+              confirmed restart.
+            </p>
+          </div>
+          <OperatorResourceFreshness
+            label="Runtime evidence"
+            lastUpdatedAt={resource.lastUpdatedAt}
+            refreshing={resource.refreshing}
+            error={resource.error}
+            onRefresh={async () => {
+              await Promise.all([
+                resource.refresh(),
+                metricsResource.refresh(),
+              ]);
+            }}
+          />
         </header>
 
-        {loading && (
+        {resource.loading && (
           <StatusPanel
             title="Loading operator state"
             detail="Waiting for configuration and effective-state evidence."
           />
         )}
-        {error && <ErrorCallout error={error} onRetry={load} />}
+        {resource.error && (
+          <ErrorCallout error={resource.error} onRetry={resource.refresh} />
+        )}
+        {error && <ErrorCallout error={error} onRetry={resource.refresh} />}
 
-        {data && !loading && (
+        {data && !resource.loading && (
           <>
             <RuntimeSummary data={data} />
             <RuntimeObservability
               metrics={runtimeMetrics}
-              error={runtimeMetricsError}
+              error={metricsResource.error}
             />
             {saveResult && (
               <Callout
@@ -403,46 +395,65 @@ export default function RuntimeSettingsPage() {
 
 function RuntimeSummary({ data }: { data: RuntimeData }) {
   const status = data.status;
-  const effectiveRevision = status?.runtime.effectiveRevision;
   const state = !status
-    ? "Unavailable"
+    ? "Not verified"
     : status.freshness.state === "stale"
-      ? "Stale"
-      : effectiveRevision === data.configuration.revision
-        ? "Effective"
-        : "Pending restart";
+      ? "Status out of date"
+      : status.runtime.restartPending
+        ? "Restart required"
+        : "In use";
   return (
     <section
       className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4"
       aria-label="Runtime summary"
     >
       <SummaryItem
-        label="Instance"
+        label="Deployment"
         value={data.configuration.instance.displayName}
         detail={data.configuration.instance.id}
       />
       <SummaryItem
-        label="Profile"
+        label="Server limits"
         value={data.configuration.runtime.profile}
-        detail={`${formatBytes(data.configuration.runtime.memoryMaxBytes)} memory.max · no CPU quota`}
+        detail={`${formatBytes(data.configuration.runtime.memoryMaxBytes)} memory limit · no CPU limit set`}
       />
       <SummaryItem
-        label="Configuration"
-        value={`Revision ${data.configuration.revision}`}
-        detail={`Updated ${formatDate(data.configuration.updatedAt)}`}
+        label="Saved settings"
+        value={`Version ${data.configuration.revision}`}
+        detail={`Last changed ${formatDate(data.configuration.updatedAt)}`}
       />
       <SummaryItem
-        label="Effective state"
+        label="Running settings"
         value={state}
         detail={
           status
-            ? `Observed ${formatDate(status.runtime.observedAt)} · revision ${effectiveRevision ?? "not reported"}`
-            : "No validated status provider"
+            ? runtimeStatusDetail(data)
+            : "Could not confirm which settings the backend is using"
         }
-        warning={state !== "Effective"}
+        warning={state !== "In use"}
       />
     </section>
   );
+}
+
+function runtimeStatusDetail(data: RuntimeData) {
+  const { status } = data;
+  if (!status) return "Could not confirm which settings the backend is using";
+  const checked = `checked ${formatDate(status.generatedAt)}`;
+  if (!status.runtime.restartPending)
+    return `The backend is using the saved limits · ${checked}`;
+
+  const effective = status.runtime.effectiveKnobs;
+  if (!effective)
+    return `The backend did not report its running limits · ${checked}`;
+  const differences = Object.entries(data.configuration.runtime.knobs).filter(
+    ([name, saved]) => !Object.is(saved, effective[name]),
+  );
+  if (differences.length === 1) {
+    const [name, saved] = differences[0];
+    return `${knobTitle(name)} is saved as ${String(saved)} but running as ${String(effective[name])} · ${checked}`;
+  }
+  return `${differences.length} saved limits differ from the running backend · review the highlighted rows below · ${checked}`;
 }
 
 function SummaryItem({
@@ -810,24 +821,48 @@ function RuntimeObservability({
             </div>
           ) : (
             <>
-              <div className="mt-3 grid gap-3 lg:grid-cols-3">
+              <div className="mt-3 overflow-hidden rounded-lg border bg-background-primary">
                 {summary.map((item) => (
                   <div
                     key={item.title}
-                    className="rounded-lg border bg-background-primary p-4"
+                    className="grid min-w-0 gap-3 border-b p-4 last:border-b-0 md:grid-cols-[minmax(11rem,0.7fr)_minmax(0,1.3fr)] md:items-center"
                   >
-                    <HealthSignal
-                      level={item.level}
-                      label={item.status}
-                      compact
-                    />
-                    <div className="mt-3 font-semibold">{item.title}</div>
-                    <h5 className="mt-1 font-semibold tabular-nums">
-                      {item.value}
-                    </h5>
-                    <p className="mt-2 text-xs/relaxed text-content-secondary">
-                      {item.explanation}
-                    </p>
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="font-semibold">{item.title}</div>
+                        <HealthSignal
+                          level={item.level}
+                          label={item.status}
+                          compact
+                        />
+                      </div>
+                      <h5 className="mt-1 font-semibold tabular-nums">
+                        {item.value}
+                      </h5>
+                    </div>
+                    <div className="min-w-0">
+                      {item.visualPercent !== null ? (
+                        <div className="mb-2 h-2 overflow-hidden rounded-full bg-background-tertiary">
+                          <div
+                            className={
+                              item.level === "critical"
+                                ? "h-full rounded-full bg-util-error"
+                                : item.level === "attention"
+                                  ? "h-full rounded-full bg-util-warning"
+                                  : "h-full rounded-full bg-util-success"
+                            }
+                            style={{
+                              width: `${Math.max(0, Math.min(100, item.visualPercent))}%`,
+                            }}
+                            role="img"
+                            aria-label={`${item.title}: ${item.value}`}
+                          />
+                        </div>
+                      ) : null}
+                      <p className="text-xs/relaxed wrap-break-word text-content-secondary">
+                        {item.explanation}
+                      </p>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -982,6 +1017,7 @@ function summarizeRuntimeEvidence(samples: RuntimeSample[]) {
             : "Review efficiency",
       explanation:
         "Share of eligible queries and mutations that reused an already-initialized JavaScript context. Higher is faster; a miss is safe and simply performs a normal initialization.",
+      visualPercent: reuseRate === null ? null : reuseRate * 100,
     },
     {
       title: "Capacity protection",
@@ -991,6 +1027,7 @@ function summarizeRuntimeEvidence(samples: RuntimeSample[]) {
       explanation: pressureNow
         ? `${deferrals.toLocaleString()} lower-priority query deferrals have protected normal traffic. Active pressure means users may temporarily see stale data.`
         : `${deferrals.toLocaleString()} historical deferrals. No capacity-pressure episode is active now.`,
+      visualPercent: null,
     },
     {
       title: "Cancelled database work",
@@ -1003,6 +1040,7 @@ function summarizeRuntimeEvidence(samples: RuntimeSample[]) {
           : "No evidence",
       explanation:
         "Requests abandoned by clients should cancel their PostgreSQL work. Zero is normal when no requests were cancelled; failures require immediate investigation.",
+      visualPercent: null,
     },
   ];
 }
@@ -1069,7 +1107,7 @@ function validateProposed(
 }
 
 function formatBytes(value: number) {
-  return `${(value / 1024 ** 3).toFixed(0)} gibibytes`;
+  return `${(value / 1024 ** 3).toFixed(0)} GiB`;
 }
 
 function formatDate(value: string) {

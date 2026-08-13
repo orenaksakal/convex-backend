@@ -60,7 +60,7 @@ export function SettingsSidebar({
         )}
       >
         {/* On larger screens, this is a sidebar and not a popover menu. */}
-        {allowedPages.map((page) => {
+        {allowedPages.map(page => {
           const showInCloudDashboard =
             page === "backups" && isCloudDeploymentInSelfHostedDashboard;
           const isUnavailableForSelfHosted =
@@ -168,16 +168,19 @@ function useAllowedPages() {
   let pages = DEPLOYMENT_SETTINGS_PAGES;
 
   if (!nents || nents.length === 0) {
-    pages = pages.filter((d) => d !== "components");
+    pages = pages.filter(d => d !== "components");
   }
 
   if (isSelfHosted) {
     pages = pages.filter(
-      (page) => page !== "custom-domains" && page !== "usage-limits",
+      page =>
+        page !== "custom-domains" &&
+        page !== "usage-limits" &&
+        page !== "snapshots",
     );
   } else {
     pages = pages.filter(
-      (page) =>
+      page =>
         page !== "snapshots" &&
         page !== "runtime" &&
         page !== "operations" &&
@@ -189,7 +192,7 @@ function useAllowedPages() {
 
   // Usage limits is feature-flagged; hide it from the sidebar when off.
   if (!usageLimitsEnabled) {
-    pages = pages.filter((d) => d !== "usage-limits");
+    pages = pages.filter(d => d !== "usage-limits");
   }
 
   return pages;

@@ -210,6 +210,7 @@ use keybroker::{
     DeploymentOp,
     Identity,
     KeyBroker,
+    UserIdentityAttributes,
 };
 use log_streaming::add_local_log_sink_on_startup;
 use maplit::{
@@ -457,6 +458,17 @@ use crate::{
     },
     worker_handles::WorkerHandles,
 };
+
+fn identity_acting_as_user(
+    admin_identity: Identity,
+    acting_user: UserIdentityAttributes,
+) -> anyhow::Result<Identity> {
+    admin_identity.require_operation(DeploymentOp::ActAsUser)?;
+    let Identity::DeploymentAdmin(admin_identity) = admin_identity else {
+        anyhow::bail!("Admin identity returned from check_admin_key was not an admin.");
+    };
+    Ok(Identity::ActingUser(admin_identity, acting_user.into()))
+}
 
 pub struct ConfigMetadataAndSchema {
     pub config_metadata: ConfigMetadata,
@@ -3333,15 +3345,7 @@ impl<RT: Runtime> Application<RT> {
                 let admin_identity = self.app_auth().check_key(token.to_string()).await?;
 
                 match acting_as {
-                    Some(acting_user) => {
-                        // Act as the given user
-                        let Identity::DeploymentAdmin(i) = admin_identity else {
-                            anyhow::bail!(
-                                "Admin identity returned from check_admin_key was not an admin."
-                            );
-                        };
-                        Identity::ActingUser(i, acting_user.into())
-                    },
+                    Some(acting_user) => identity_acting_as_user(admin_identity, acting_user)?,
                     None => admin_identity,
                 }
             },
@@ -4062,6 +4066,51 @@ impl<RT: Runtime> Application<RT> {
         self.function_log.shutdown();
         self.usage_event_logger.shutdown().await?;
         tracing::info!("Application shut down");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod acting_user_authorization_tests {
+    use common::types::MemberId;
+    use keybroker::{
+        AdminIdentity,
+        AdminIdentityPrincipal,
+    };
+
+    use super::*;
+
+    fn admin_identity(allowed_ops: Vec<DeploymentOp>) -> Identity {
+        Identity::DeploymentAdmin(AdminIdentity::new_for_access_token(
+            "test-instance".to_owned(),
+            AdminIdentityPrincipal::Member(MemberId(0)),
+            "test-access-token".to_owned(),
+            false,
+            allowed_ops,
+            SystemTime::now(),
+            None,
+            None,
+        ))
+    }
+
+    #[test]
+    fn deploy_only_identity_cannot_act_as_user() {
+        let result = identity_acting_as_user(
+            admin_identity(vec![DeploymentOp::Deploy]),
+            UserIdentityAttributes::default(),
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn explicitly_authorized_identity_can_act_as_user() -> anyhow::Result<()> {
+        let identity = identity_acting_as_user(
+            admin_identity(vec![DeploymentOp::ActAsUser]),
+            UserIdentityAttributes::default(),
+        )?;
+
+        assert!(matches!(identity, Identity::ActingUser(_, _)));
         Ok(())
     }
 }

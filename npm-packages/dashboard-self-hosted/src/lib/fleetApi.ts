@@ -44,7 +44,11 @@ export type FleetDeployment = {
   observed?: { adopted?: boolean; [key: string]: unknown };
   activeOperation?: {
     id: string;
-    kind?: "deployment.provision" | "deployment.retry" | "deployment.delete";
+    kind?:
+      | "deployment.provision"
+      | "deployment.retry"
+      | "deployment.reconfigure"
+      | "deployment.delete";
     state: "queued" | "running" | "failed" | "succeeded";
     currentStep: string | null;
   } | null;
@@ -65,10 +69,14 @@ export type FleetDeploymentHealth = {
 export class FleetApiError extends Error {
   status: number;
   code: string;
+  requestId: string | null;
 
   constructor(
     status: number,
-    payload: { error?: { code?: string; message?: string } },
+    payload: {
+      error?: { code?: string; message?: string; requestId?: string };
+    },
+    responseRequestId: string | null = null,
   ) {
     super(
       payload.error?.message ??
@@ -77,6 +85,7 @@ export class FleetApiError extends Error {
     this.name = "FleetApiError";
     this.status = status;
     this.code = payload.error?.code ?? "unknown";
+    this.requestId = payload.error?.requestId ?? responseRequestId;
   }
 }
 
@@ -105,20 +114,27 @@ export async function fleetDeploymentHealth(
   }
 }
 
-export function createFleetProject(input: { name: string; slug?: string }) {
+export function createFleetProject(
+  input: { name: string; slug?: string },
+  idempotencyKey: string,
+) {
   return fleetRequest<{ project: FleetProject }>("/v1/projects", {
     method: "POST",
-    headers: mutationHeaders(),
+    headers: mutationHeaders(idempotencyKey),
     body: JSON.stringify(input),
   });
 }
 
-export function deleteFleetProject(projectSlug: string, confirmation: string) {
+export function deleteFleetProject(
+  projectSlug: string,
+  confirmation: string,
+  idempotencyKey: string,
+) {
   return fleetRequest<{ project: FleetProject; removed: true }>(
     `/v1/projects/${encodeURIComponent(projectSlug)}/delete`,
     {
       method: "POST",
-      headers: mutationHeaders(),
+      headers: mutationHeaders(idempotencyKey),
       body: JSON.stringify({ confirmation }),
     },
   );
@@ -135,24 +151,78 @@ export function createFleetDeployment(
     siteDomain: string;
     applicationDomain?: string;
   },
+  idempotencyKey: string,
 ) {
   return fleetRequest<{
     deployment: FleetDeployment;
     operation: { id: string; state: string };
   }>(`/v1/projects/${encodeURIComponent(projectSlug)}/deployments`, {
     method: "POST",
-    headers: mutationHeaders(),
+    headers: mutationHeaders(idempotencyKey),
     body: JSON.stringify(input),
   });
 }
 
-export function retryFleetDeployment(deploymentId: string) {
+export function adoptFleetDeployment(
+  projectSlug: string,
+  input: {
+    name: string;
+    reference?: string;
+    type: "dev" | "prod";
+    isDefault?: boolean;
+    hostId?: string;
+    deploymentUrl: string;
+    siteUrl?: string | null;
+    dashboardUrl: string;
+    operatorUrl: string;
+    databaseBindingAlias: string;
+  },
+  idempotencyKey: string,
+) {
+  return fleetRequest<{ deployment: FleetDeployment }>(
+    `/v1/projects/${encodeURIComponent(projectSlug)}/deployments/adopt`,
+    {
+      method: "POST",
+      headers: mutationHeaders(idempotencyKey),
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function reconfigureFleetDeploymentDomains(
+  deploymentId: string,
+  input: {
+    applicationDomain: string;
+    deploymentDomain: string;
+    siteDomain: string;
+    confirmation: string;
+  },
+  idempotencyKey: string,
+) {
+  return fleetRequest<{
+    deployment: FleetDeployment;
+    operation: {
+      id: string;
+      kind: "deployment.reconfigure";
+      state: string;
+    } | null;
+  }>(`/v1/deployments/${encodeURIComponent(deploymentId)}/domains`, {
+    method: "POST",
+    headers: mutationHeaders(idempotencyKey),
+    body: JSON.stringify(input),
+  });
+}
+
+export function retryFleetDeployment(
+  deploymentId: string,
+  idempotencyKey: string,
+) {
   return fleetRequest<{
     deployment: FleetDeployment;
     operation: { id: string; state: string; completedSteps: string[] };
   }>(`/v1/deployments/${encodeURIComponent(deploymentId)}/retry`, {
     method: "POST",
-    headers: mutationHeaders(),
+    headers: mutationHeaders(idempotencyKey),
     body: JSON.stringify({}),
   });
 }
@@ -168,13 +238,14 @@ export function cloneFleetDeployment(
     siteDomain: string;
     applicationDomain?: string;
   },
+  idempotencyKey: string,
 ) {
   return fleetRequest<{
     deployment: FleetDeployment;
     operation: { id: string; kind: string; state: string };
   }>(`/v1/deployments/${encodeURIComponent(deploymentId)}/clone`, {
     method: "POST",
-    headers: mutationHeaders(),
+    headers: mutationHeaders(idempotencyKey),
     body: JSON.stringify(input),
   });
 }
@@ -182,6 +253,7 @@ export function cloneFleetDeployment(
 export function deleteFleetDeployment(
   deploymentId: string,
   confirmation: string,
+  idempotencyKey: string,
 ) {
   return fleetRequest<{
     deployment: FleetDeployment;
@@ -189,7 +261,7 @@ export function deleteFleetDeployment(
     resourcesDeleted: boolean;
   }>(`/v1/deployments/${encodeURIComponent(deploymentId)}/delete`, {
     method: "POST",
-    headers: mutationHeaders(),
+    headers: mutationHeaders(idempotencyKey),
     body: JSON.stringify({ confirmation }),
   });
 }
@@ -214,7 +286,6 @@ export function issueFleetDashboardCredential(deploymentId: string) {
     };
   }>(`/v1/deployments/${encodeURIComponent(deploymentId)}/dashboard-token`, {
     method: "POST",
-    headers: mutationHeaders(),
   });
 }
 
@@ -226,15 +297,22 @@ async function fleetRequest<T>(path: string, init: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
-    throw new FleetApiError(response.status, payload);
+    throw new FleetApiError(
+      response.status,
+      payload,
+      response.headers.get("x-request-id"),
+    );
   }
   return response.json() as Promise<T>;
 }
 
-function mutationHeaders() {
+function mutationHeaders(idempotencyKey: string) {
+  if (idempotencyKey.length < 8 || idempotencyKey.length > 200) {
+    throw new Error("Fleet mutation idempotency key is invalid");
+  }
   return {
     "Content-Type": "application/json",
-    "Idempotency-Key": crypto.randomUUID(),
+    "Idempotency-Key": idempotencyKey,
   };
 }
 
