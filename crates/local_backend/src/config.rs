@@ -27,7 +27,7 @@ use url::Url;
 #[clap(version = &**SERVER_VERSION_STR, author = "Convex, Inc. <no-reply@convex.dev>", group(clap::ArgGroup::new("storage").multiple(false)))]
 pub struct LocalConfig {
     /// File path for SQLite, the file path; for postgres, a server URL.
-    #[clap(default_value = "convex_local_backend.sqlite3")]
+    #[clap(env = "CONVEX_DB_SPEC", default_value = "convex_local_backend.sqlite3")]
     pub db_spec: String,
 
     /// Database driver type.
@@ -83,7 +83,7 @@ pub struct LocalConfig {
     pub instance_name: Option<String>,
 
     /// Instance secret for this backend.
-    #[clap(long, requires = "instance_name")]
+    #[clap(long, env = "INSTANCE_SECRET", hide_env_values = true, requires = "instance_name")]
     pub instance_secret: Option<String>,
 
     /// Identifier (like a user ID) to attach to any sentry

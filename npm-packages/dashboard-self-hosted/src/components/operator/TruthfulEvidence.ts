@@ -13,7 +13,7 @@ export type EvidencePresentation = {
 
 export function alertPolicyPresentation(
   policy: Pick<OperatorConfiguration["alerts"], "enabled" | "destinationAlias">,
-  destinations: AlertDestinations | null
+  destinations: AlertDestinations | null,
 ): EvidencePresentation {
   if (!policy.enabled) {
     return {
@@ -38,18 +38,33 @@ export function alertPolicyPresentation(
         "The selected destination does not have a complete email or Telegram configuration.",
     };
   }
+  if (!destinations.telegram.enabled) {
+    return {
+      level: "attention",
+      label: "Immediate Telegram alerts are unavailable",
+      detail:
+        "Email digests are configured, but critical incidents must fall back to immediate email until Telegram is enabled.",
+    };
+  }
+  if (!destinations.email.enabled) {
+    return {
+      level: "attention",
+      label: "Email digests are unavailable",
+      detail:
+        "Telegram alerts are configured, but daily and weekly email digests require an enabled email destination.",
+    };
+  }
   return {
     level: "healthy",
     label: "Alert policy is on",
-    detail: `${configuredDestinationLabel(
-      destinations
-    )} Delivery results are reported above.`,
+    detail:
+      "Telegram sends sustained incidents immediately. Email groups routine transitions into daily and weekly fleet digests.",
   };
 }
 
 export function backupSchedulePresentation(
   policy: OperatorConfiguration["backup"],
-  status: OperatorStatus | null
+  status: OperatorStatus | null,
 ): EvidencePresentation {
   const scheduler = status?.backups.scheduler;
   if (!policy.enabled) {
@@ -111,7 +126,7 @@ export function backupSchedulePresentation(
 export function exposureProbePresentation(
   reachable: boolean | null | undefined,
   evidenceIsCurrent: boolean,
-  subject: string
+  subject: string,
 ): EvidencePresentation {
   if (reachable === true) {
     return {
@@ -139,17 +154,6 @@ export function exposureProbePresentation(
     label: "Unknown",
     detail: `No validated external exposure result is available for ${subject.toLowerCase()}.`,
   };
-}
-
-function configuredDestinationLabel(destinations: AlertDestinations) {
-  if (destinations.email.enabled && destinations.telegram.enabled) {
-    return "Email and Telegram destinations are configured.";
-  }
-  if (destinations.email.enabled) return "An email destination is configured.";
-  if (destinations.telegram.enabled) {
-    return "A Telegram destination is configured.";
-  }
-  return "A delivery destination is configured.";
 }
 
 function scheduleLabel(schedule: string) {

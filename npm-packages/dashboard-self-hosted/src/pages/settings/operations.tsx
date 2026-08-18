@@ -188,7 +188,10 @@ export default function ApplicationOperationsPage() {
               />
               <AuthBridgeCard
                 operations={data.operations}
-                retryEnabled={actionEnabled("auth-outbox-retry")}
+                retryEnabled={
+                  actionEnabled("auth-outbox-retry") &&
+                  data.operations.authBridge.retrySupported
+                }
                 preparingKind={preparingKind}
                 eventId={eventId}
                 setEventId={setEventId}
@@ -406,6 +409,13 @@ function AuthBridgeCard({
         </p>
       ) : (
         <>
+          {bridge.variant === "legacy" ? (
+            <Callout variant="instructions" className="mt-3">
+              This app uses the legacy auth bridge. Delivery evidence is
+              available, but this schema has no dead-letter state to repair
+              from the fleet dashboard.
+            </Callout>
+          ) : null}
           <div className="mt-5">
             <MetricBar
               label="Delivery completion"
