@@ -9,6 +9,7 @@ import {
   GlobeIcon,
   Link2Icon,
   PlusIcon,
+  Pencil1Icon,
   ReloadIcon,
   TrashIcon,
 } from "@radix-ui/react-icons";
@@ -48,6 +49,8 @@ import {
   fleetDeploymentHealth,
   retryFleetDeployment,
   reconfigureFleetDeploymentDomains,
+  renameFleetDeployment,
+  renameFleetProject,
 } from "../lib/fleetApi";
 import {
   FleetMutationIntent,
@@ -72,6 +75,11 @@ export default function FleetPage() {
   const [projectToDelete, setProjectToDelete] = useState<FleetProject | null>(
     null,
   );
+  const [renameAction, setRenameAction] = useState<
+    | { kind: "project"; project: FleetProject }
+    | { kind: "deployment"; deployment: FleetDeployment }
+    | null
+  >(null);
   const refreshInFlight = useRef<Promise<void> | null>(null);
 
   const refresh = useCallback(() => {
@@ -198,6 +206,12 @@ export default function FleetPage() {
               onDomains={(deployment) =>
                 setDeploymentAction({ kind: "domains", deployment })
               }
+              onRenameDeployment={(deployment) =>
+                setRenameAction({ kind: "deployment", deployment })
+              }
+              onRenameProject={() =>
+                setRenameAction({ kind: "project", project: selectedProject })
+              }
               onDeleteProject={() => setProjectToDelete(selectedProject)}
             />
           ) : null}
@@ -281,6 +295,16 @@ export default function FleetPage() {
             await refresh();
             setProjectToDelete(null);
             void router.replace("/fleet");
+          }}
+        />
+      ) : null}
+      {renameAction ? (
+        <RenameFleetResourceModal
+          target={renameAction}
+          onClose={() => setRenameAction(null)}
+          onRenamed={async () => {
+            await refresh();
+            setRenameAction(null);
           }}
         />
       ) : null}
@@ -386,6 +410,8 @@ function ProjectDeployments({
   onClone,
   onDelete,
   onDomains,
+  onRenameProject,
+  onRenameDeployment,
   onDeleteProject,
 }: {
   project: FleetProject;
@@ -397,6 +423,8 @@ function ProjectDeployments({
   onClone(deployment: FleetDeployment): void;
   onDelete(deployment: FleetDeployment): void;
   onDomains(deployment: FleetDeployment): void;
+  onRenameProject(): void;
+  onRenameDeployment(deployment: FleetDeployment): void;
   onDeleteProject(): void;
 }) {
   const ready = deployments.filter(
@@ -424,6 +452,13 @@ function ProjectDeployments({
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            variant="neutral"
+            icon={<Pencil1Icon />}
+            onClick={onRenameProject}
+          >
+            Rename project
+          </Button>
           {deployments.length === 0 ? (
             <Button
               variant="neutral"
@@ -452,6 +487,7 @@ function ProjectDeployments({
               onClone={() => onClone(deployment)}
               onDelete={() => onDelete(deployment)}
               onDomains={() => onDomains(deployment)}
+              onRename={() => onRenameDeployment(deployment)}
             />
           ))}
         </div>
@@ -481,6 +517,7 @@ function DeploymentCard({
   onClone,
   onDelete,
   onDomains,
+  onRename,
 }: {
   deployment: FleetDeployment;
   health?: FleetDeploymentHealth;
@@ -488,6 +525,7 @@ function DeploymentCard({
   onClone(): void;
   onDelete(): void;
   onDomains(): void;
+  onRename(): void;
 }) {
   const ready = deployment.state === "ready";
   const deletionFailed =
@@ -577,6 +615,14 @@ function DeploymentCard({
           ) : null}
         </div>
         <div className="flex flex-wrap justify-end gap-2">
+          <Button
+            variant="neutral"
+            size="sm"
+            icon={<Pencil1Icon />}
+            onClick={onRename}
+          >
+            Rename
+          </Button>
           {ready ? (
             <Button
               variant="neutral"
@@ -652,6 +698,93 @@ function DeploymentCard({
         </div>
       </div>
     </article>
+  );
+}
+
+export function RenameFleetResourceModal({
+  target,
+  onClose,
+  onRenamed,
+}: {
+  target:
+    | { kind: "project"; project: FleetProject }
+    | { kind: "deployment"; deployment: FleetDeployment };
+  onClose(): void;
+  onRenamed(): void;
+}) {
+  const resource =
+    target.kind === "project" ? target.project : target.deployment;
+  const [name, setName] = useState(resource.name);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const mutationIntent = useRef<FleetMutationIntent | null>(null);
+  const label = target.kind === "project" ? "project" : "deployment";
+  const stableIdentity =
+    target.kind === "project"
+      ? target.project.slug
+      : `${target.deployment.projectSlug}/${target.deployment.reference}`;
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setLoading(true);
+    setError(null);
+    try {
+      const trimmedName = name.trim();
+      const intent = mutationIdempotencyKey(mutationIntent, {
+        kind: target.kind,
+        id: resource.id,
+        name: trimmedName,
+      });
+      if (target.kind === "project") {
+        await renameFleetProject(target.project.slug, trimmedName, intent);
+      } else {
+        await renameFleetDeployment(target.deployment.id, trimmedName, intent);
+      }
+      onRenamed();
+    } catch (caught) {
+      setError(asError(caught).message);
+      setLoading(false);
+    }
+  }
+
+  return (
+    <Modal
+      onClose={onClose}
+      title={`Rename ${label}`}
+      description={`Change the display name for ${stableIdentity}. Its stable identity and resources will not change.`}
+    >
+      <form className="flex flex-col gap-4 py-4" onSubmit={submit}>
+        <TextInput
+          id={`fleet-rename-${label}`}
+          label={`${target.kind === "project" ? "Project" : "Deployment"} name`}
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          autoFocus
+          required
+        />
+        <div className="rounded-xl border bg-background-primary px-3 py-2 text-xs/relaxed text-content-secondary">
+          The {target.kind === "project" ? "slug" : "reference, domains"}, IDs,
+          credentials, runtime, and backup identity stay unchanged.
+        </div>
+        {error ? (
+          <p role="alert" className="text-sm text-content-errorSecondary">
+            {error}
+          </p>
+        ) : null}
+        <div className="flex justify-end gap-2">
+          <Button variant="neutral" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            loading={loading}
+            disabled={!name.trim() || name.trim() === resource.name}
+          >
+            Rename {label}
+          </Button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 

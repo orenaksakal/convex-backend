@@ -27,6 +27,18 @@ export type FleetDeployment = {
   desiredPolicy: {
     profile: "development" | "production";
     postgresConnectionLimit: number;
+    maxConcurrentQueries: number;
+    maxConcurrentMutations: number;
+    maxConcurrentV8Actions: number;
+    maxConcurrentNodeActions: number;
+    maxConcurrentSyncs: number;
+    capacityEnvelope: {
+      testedUsersPerApp: number;
+      operatingReservePercent: number;
+      planningUsersPerApp: number;
+      testedAppCount: number;
+      maxSubscriptionsPerQueryBucket: number;
+    };
     backupRequired: boolean;
     backupSchedule: string | null;
     backupRetentionDays: number;
@@ -123,6 +135,21 @@ export function createFleetProject(
     headers: mutationHeaders(idempotencyKey),
     body: JSON.stringify(input),
   });
+}
+
+export function renameFleetProject(
+  projectSlug: string,
+  name: string,
+  idempotencyKey: string,
+) {
+  return fleetRequest<{ project: FleetProject }>(
+    `/v1/projects/${encodeURIComponent(projectSlug)}/rename`,
+    {
+      method: "POST",
+      headers: mutationHeaders(idempotencyKey),
+      body: JSON.stringify({ name }),
+    },
+  );
 }
 
 export function deleteFleetProject(
@@ -225,6 +252,21 @@ export function retryFleetDeployment(
     headers: mutationHeaders(idempotencyKey),
     body: JSON.stringify({}),
   });
+}
+
+export function renameFleetDeployment(
+  deploymentId: string,
+  name: string,
+  idempotencyKey: string,
+) {
+  return fleetRequest<{ deployment: FleetDeployment }>(
+    `/v1/deployments/${encodeURIComponent(deploymentId)}/rename`,
+    {
+      method: "POST",
+      headers: mutationHeaders(idempotencyKey),
+      body: JSON.stringify({ name }),
+    },
+  );
 }
 
 export function cloneFleetDeployment(

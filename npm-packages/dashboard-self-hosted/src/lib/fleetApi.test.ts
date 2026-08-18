@@ -3,6 +3,8 @@ import {
   createFleetProject,
   fleetBootstrap,
   reconfigureFleetDeploymentDomains,
+  renameFleetDeployment,
+  renameFleetProject,
 } from "./fleetApi";
 
 afterEach(() => {
@@ -98,6 +100,30 @@ test("uses stable intent keys for adoption and domain reconfiguration", async ()
       "Idempotency-Key"
     ],
   ).toBe("domain-intent-key");
+});
+
+test("renames project and deployment labels through stable identity paths", async () => {
+  const fetchMock = mockFetch({
+    ok: true,
+    status: 200,
+    json: async () => ({}),
+  } as Response);
+
+  await renameFleetProject("example project", "Renamed", "project-intent");
+  await renameFleetDeployment("dep_abc/123", "Production", "deployment-intent");
+
+  expect(fetchMock.mock.calls[0][0]).toBe(
+    "/fleet/v1/projects/example%20project/rename",
+  );
+  expect(fetchMock.mock.calls[0][1]?.body).toBe(
+    JSON.stringify({ name: "Renamed" }),
+  );
+  expect(fetchMock.mock.calls[1][0]).toBe(
+    "/fleet/v1/deployments/dep_abc%2F123/rename",
+  );
+  expect(fetchMock.mock.calls[1][1]?.body).toBe(
+    JSON.stringify({ name: "Production" }),
+  );
 });
 
 function mockFetch(response: Partial<Response>) {
