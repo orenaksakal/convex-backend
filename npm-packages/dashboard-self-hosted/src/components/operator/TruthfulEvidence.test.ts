@@ -30,7 +30,7 @@ describe("truthful operator evidence", () => {
 
   test("reports the configured alert policy without assuming delivery", () => {
     expect(
-      alertPolicyPresentation({ enabled: false, destinationAlias: null }, null)
+      alertPolicyPresentation({ enabled: false, destinationAlias: null }, null),
     ).toMatchObject({
       level: "unknown",
       label: "Alert policy is off",
@@ -38,8 +38,8 @@ describe("truthful operator evidence", () => {
     expect(
       alertPolicyPresentation(
         { enabled: true, destinationAlias: "email-telegram" },
-        null
-      )
+        null,
+      ),
     ).toMatchObject({
       level: "attention",
       label: "Alert policy is on; delivery setup is incomplete",
@@ -47,19 +47,31 @@ describe("truthful operator evidence", () => {
     expect(
       alertPolicyPresentation(
         { enabled: true, destinationAlias: "email-telegram" },
-        configuredDestinations()
-      )
+        configuredDestinations(),
+      ),
     ).toEqual({
       level: "healthy",
       label: "Alert policy is on",
       detail:
-        "Email and Telegram destinations are configured. Delivery results are reported above.",
+        "Telegram sends sustained incidents immediately. Email groups routine transitions into daily and weekly fleet digests.",
+    });
+    expect(
+      alertPolicyPresentation(
+        { enabled: true, destinationAlias: "email-telegram" },
+        {
+          ...configuredDestinations(),
+          email: { enabled: false, passwordConfigured: false },
+        },
+      ),
+    ).toMatchObject({
+      level: "attention",
+      label: "Email digests are unavailable",
     });
   });
 
   test("separates a saved backup schedule from runtime confirmation", () => {
     expect(
-      backupSchedulePresentation(backupPolicy({ enabled: false }), null)
+      backupSchedulePresentation(backupPolicy({ enabled: false }), null),
     ).toMatchObject({
       level: "unknown",
       label: "Automatic backups are off",
@@ -67,14 +79,14 @@ describe("truthful operator evidence", () => {
     expect(
       backupSchedulePresentation(
         backupPolicy({ enabled: true, schedule: null }),
-        currentStatus("idle")
-      )
+        currentStatus("idle"),
+      ),
     ).toMatchObject({
       level: "attention",
       label: "No automatic backup schedule is configured",
     });
     expect(
-      backupSchedulePresentation(backupPolicy({ enabled: true }), null)
+      backupSchedulePresentation(backupPolicy({ enabled: true }), null),
     ).toMatchObject({
       level: "unknown",
       label: "Daily schedule configured",
@@ -82,8 +94,8 @@ describe("truthful operator evidence", () => {
     expect(
       backupSchedulePresentation(
         backupPolicy({ enabled: true }),
-        currentStatus("idle")
-      )
+        currentStatus("idle"),
+      ),
     ).toEqual({
       level: "healthy",
       label: "Daily schedule configured",
@@ -92,8 +104,8 @@ describe("truthful operator evidence", () => {
     expect(
       backupSchedulePresentation(
         backupPolicy({ enabled: true }),
-        currentStatus("failed", "archive upload failed")
-      )
+        currentStatus("failed", "archive upload failed"),
+      ),
     ).toMatchObject({
       level: "critical",
       detail:
@@ -103,16 +115,16 @@ describe("truthful operator evidence", () => {
 
   test("reports public, private, and unknown exposure without false reassurance", () => {
     expect(
-      exposureProbePresentation(true, false, "Administrative endpoints")
+      exposureProbePresentation(true, false, "Administrative endpoints"),
     ).toMatchObject({ level: "critical", label: "Confirmed public" });
     expect(
-      exposureProbePresentation(false, true, "Administrative endpoints")
+      exposureProbePresentation(false, true, "Administrative endpoints"),
     ).toMatchObject({ level: "healthy", label: "Confirmed private" });
     expect(
-      exposureProbePresentation(false, false, "Administrative endpoints")
+      exposureProbePresentation(false, false, "Administrative endpoints"),
     ).toMatchObject({ level: "unknown", label: "Unknown" });
     expect(
-      exposureProbePresentation(null, true, "Administrative endpoints")
+      exposureProbePresentation(null, true, "Administrative endpoints"),
     ).toMatchObject({ level: "unknown", label: "Unknown" });
   });
 });
@@ -128,7 +140,7 @@ function configuredDestinations(): AlertDestinations {
 }
 
 function backupPolicy(
-  changes: Partial<OperatorConfiguration["backup"]>
+  changes: Partial<OperatorConfiguration["backup"]>,
 ): OperatorConfiguration["backup"] {
   return {
     enabled: true,
@@ -143,7 +155,7 @@ function backupPolicy(
 
 function currentStatus(
   state: NonNullable<OperatorStatus["backups"]["scheduler"]>["state"],
-  lastError: string | null = null
+  lastError: string | null = null,
 ): OperatorStatus {
   return {
     freshness: { state: "current" },

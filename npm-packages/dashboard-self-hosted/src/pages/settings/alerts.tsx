@@ -53,7 +53,7 @@ export default function AlertsPage() {
   const [accepted, setAccepted] = useState<ExecutedOperatorAction | null>(null);
   const [actionError, setActionError] = useState<Error | null>(null);
   const [destinations, setDestinations] = useState<AlertDestinations | null>(
-    null
+    null,
   );
   const [destinationForm, setDestinationForm] =
     useState<DestinationForm | null>(null);
@@ -66,7 +66,7 @@ export default function AlertsPage() {
   useEffect(() => {
     if (!operator.metadata?.capabilities.alertDestinations.read) return;
     void operatorGet<{ destinations: AlertDestinations }>(
-      "/v1/alert-destinations"
+      "/v1/alert-destinations",
     )
       .then(({ destinations: next }) => {
         setDestinations(next);
@@ -121,7 +121,7 @@ export default function AlertsPage() {
           instanceId: configuration.instance.id,
           baseRevision: configuration.revision,
           parameters: {},
-        }
+        },
       );
       setPrepared(next);
     } catch (requestError) {
@@ -167,9 +167,11 @@ export default function AlertsPage() {
           <h3 className="font-semibold">Operational alerts</h3>
           <p className="mt-1 max-w-prose text-sm text-content-secondary">
             Configure LaunchNicely container health and Convex execution,
-            provider, and backup alerts. Host-level monitoring remains in
-            Beszel. Simple Mail Transfer Protocol (SMTP) passwords and Telegram
-            Shoutrr URLs are write-only.
+            provider, and backup alerts. Sustained incidents go to Telegram
+            immediately. Email is grouped into fleet daily and weekly digests,
+            with immediate email used only when a critical Telegram delivery
+            fails. Host-level monitoring remains in Beszel. Simple Mail Transfer
+            Protocol (SMTP) passwords and Telegram Shoutrr URLs are write-only.
           </p>
         </header>
 
@@ -209,7 +211,7 @@ export default function AlertsPage() {
                       : destinations?.configured
                       ? status?.alerts.lastDeliveryAt
                         ? `Last delivered ${formatOperatorDate(
-                            status.alerts.lastDeliveryAt
+                            status.alerts.lastDeliveryAt,
                           )}`
                         : "Destination configured; no incident delivery yet"
                       : "No email or Telegram destination configured"
@@ -263,10 +265,10 @@ export default function AlertsPage() {
                           form.lookbackMinutes
                         } minutes · ${failureCauseLabel(
                           status.alerts.metrics.convex.permanentOccFailures,
-                          "repeated database write conflicts"
+                          "repeated database write conflicts",
                         )} · ${failureCauseLabel(
                           status.alerts.metrics.convex.resourceLimitFailures,
-                          "reading too much data"
+                          "reading too much data",
                         )}`
                       : "Could not check recent function runs"
                   }
@@ -789,7 +791,7 @@ function Threshold({
         (preset) =>
           typeof preset.value === "number" &&
           preset.value >= min &&
-          preset.value <= max
+          preset.value <= max,
       )}
       min={min}
       max={max}

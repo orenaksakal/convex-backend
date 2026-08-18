@@ -4,9 +4,12 @@ export DATA_DIR=${DATA_DIR:-/convex/data}
 export TMPDIR=${TMPDIR:-"$DATA_DIR/tmp"}
 export STORAGE_DIR=${STORAGE_DIR:-"$DATA_DIR/storage"}
 export SQLITE_DB=${SQLITE_DB:-"$DATA_DIR/db.sqlite3"}
+export BACKEND_PORT=${BACKEND_PORT:-3210}
+export SITE_PROXY_PORT=${SITE_PROXY_PORT:-3211}
 
 # Database driver flags matching DbDriverTag values
 POSTGRES_DB_FLAGS=(--db postgres-v5)
+POSTGRES_MULTITENANT_DB_FLAGS=(--db postgres-v5-multitenant)
 MYSQL_DB_FLAGS=(--db mysql-v5)
 
 set -e
@@ -17,7 +20,11 @@ source ./read_credentials.sh
 # Determine database configuration
 if [ -n "$POSTGRES_URL" ]; then
     DB_SPEC="$POSTGRES_URL"
-    DB_FLAGS=("${POSTGRES_DB_FLAGS[@]}")
+    if [ "$POSTGRES_MULTITENANT" = "true" ]; then
+        DB_FLAGS=("${POSTGRES_MULTITENANT_DB_FLAGS[@]}")
+    else
+        DB_FLAGS=("${POSTGRES_DB_FLAGS[@]}")
+    fi
 elif [ -n "$MYSQL_URL" ]; then
     DB_SPEC="$MYSQL_URL"
     DB_FLAGS=("${MYSQL_DB_FLAGS[@]}")
@@ -55,11 +62,14 @@ fi
 # --convex-origin and --convex-site are how the backend can be contacted from
 # the outside world. They show up in storage urls, action callbacks, etc.
 
+# Keep instance secret and database URL in the environment so they do not
+# appear on `convex-local-backend` argv. The binary reads INSTANCE_SECRET
+# and CONVEX_DB_SPEC (or POSTGRES_URL / MYSQL_URL) through clap.
+export CONVEX_DB_SPEC="$DB_SPEC"
 exec ./convex-local-backend "$@" \
     --instance-name "$INSTANCE_NAME" \
-    --instance-secret "$INSTANCE_SECRET" \
-    --port 3210 \
-    --site-proxy-port 3211 \
+    --port "$BACKEND_PORT" \
+    --site-proxy-port "$SITE_PROXY_PORT" \
     --convex-origin "$CONVEX_CLOUD_ORIGIN" \
     --convex-site "$CONVEX_SITE_ORIGIN" \
     --beacon-tag "self-hosted-docker" \
@@ -67,5 +77,4 @@ exec ./convex-local-backend "$@" \
     ${REDACT_LOGS_TO_CLIENT:+--redact-logs-to-client} \
     ${DO_NOT_REQUIRE_SSL:+--do-not-require-ssl} \
     "${DB_FLAGS[@]}" \
-    "${STORAGE_FLAGS[@]}" \
-    "$DB_SPEC"
+    "${STORAGE_FLAGS[@]}"

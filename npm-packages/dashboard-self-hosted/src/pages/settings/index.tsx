@@ -176,14 +176,15 @@ export default function Settings() {
                 Managed persistence
               </h4>
               <p className="mt-1 text-sm text-content-secondary">
-                Every deployment uses an isolated PostgreSQL database and
-                private Cloudflare R2 storage. The fleet provisioner creates,
-                scopes, verifies, and rotates these resources automatically.
+                Every deployment uses tenant-scoped PostgreSQL persistence and
+                private Cloudflare R2 storage. PostgreSQL isolation is enforced
+                by either a dedicated database and role or the deployment&apos;s
+                mandatory instance name inside a reviewed shared database.
               </p>
               <div className="mt-4 grid gap-3 sm:grid-cols-2">
                 <ManagedProvider
                   name="PostgreSQL"
-                  detail="One database and role scoped to this deployment"
+                  detail="Tenant-scoped rows and credentials for this deployment"
                   state={status?.providers.database.state ?? "unknown"}
                 />
                 <ManagedProvider
