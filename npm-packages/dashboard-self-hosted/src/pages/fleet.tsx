@@ -2202,14 +2202,6 @@ export function deploymentOperationalItems(
       level: "critical",
       href: `/settings/backups?${deploymentQuery}`,
     });
-  } else if (status.backups.restoreDrill.state !== "passed") {
-    issues.push({
-      title: "Complete an isolated restore drill",
-      detail:
-        "The verified backup has not yet been restored into a new empty deployment.",
-      level: "attention",
-      href: `/settings/backups?${deploymentQuery}`,
-    });
   }
   const overdueCredentials = status.security.credentials.filter(
     (credential) => credential.state === "overdue",

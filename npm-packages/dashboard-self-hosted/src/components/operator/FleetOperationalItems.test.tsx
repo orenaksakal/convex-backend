@@ -51,6 +51,13 @@ test("routine unverified exposure and first-rotation states do not require manua
   );
 });
 
+test("a missing restore drill does not create an operational warning", () => {
+  const evidence = healthyEvidence();
+  evidence.status!.backups.restoreDrill.state = "never";
+
+  expect(deploymentOperationalItems(deployment(), evidence)).toEqual([]);
+});
+
 test("an empty fleet is unknown rather than healthy", () => {
   expect(fleetHealthSummary([], {})).toMatchObject({
     overall: "unknown",

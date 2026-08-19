@@ -980,8 +980,7 @@ mod tests {
     };
     use crate::write_log::{
         new_write_log,
-        OrderedIndexKeyWrites,
-        WriteSource,
+        IndexKeyWrites,
     };
 
     async fn assert_worker_signals_shutdown(mut manager: SubscriptionManager) {
@@ -1056,24 +1055,14 @@ mod tests {
         let coordinator = RetentionCoordinator::new(2, initial_ts, log_owner);
 
         let manager_0_ts = Timestamp::try_from(6_u64).unwrap();
-        log_writer.append(
-            manager_0_ts,
-            &OrderedIndexKeyWrites::empty(),
-            WriteSource::system("test"),
-            || {},
-        );
+        log_writer.append(manager_0_ts, IndexKeyWrites::empty(), || {});
         coordinator
             .update_and_enforce_retention(0, manager_0_ts)
             .unwrap();
         assert_eq!(coordinator.log.lock().enforced_ts, initial_ts);
 
         let manager_1_ts = Timestamp::try_from(7_u64).unwrap();
-        log_writer.append(
-            manager_1_ts,
-            &OrderedIndexKeyWrites::empty(),
-            WriteSource::system("test"),
-            || {},
-        );
+        log_writer.append(manager_1_ts, IndexKeyWrites::empty(), || {});
         coordinator
             .update_and_enforce_retention(1, manager_1_ts)
             .unwrap();
