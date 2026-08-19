@@ -1304,9 +1304,7 @@ pub struct IsolateClient<RT: Runtime> {
 }
 
 impl<RT: Runtime> IsolateClient<RT> {
-    pub fn preflight_context_cache_capacity(
-        max_isolate_workers: usize,
-    ) -> anyhow::Result<usize> {
+    pub fn preflight_context_cache_capacity(max_isolate_workers: usize) -> anyhow::Result<usize> {
         anyhow::ensure!(
             max_isolate_workers > 0,
             "MAX_ISOLATE_WORKERS must be greater than zero"
@@ -1340,8 +1338,7 @@ impl<RT: Runtime> IsolateClient<RT> {
         isolate_config: Option<IsolateConfig>,
         memory_pressure: MemoryPressureSignal,
     ) -> anyhow::Result<Self> {
-        let context_cache_capacity =
-            Self::preflight_context_cache_capacity(max_isolate_workers)?;
+        let context_cache_capacity = Self::preflight_context_cache_capacity(max_isolate_workers)?;
         anyhow::ensure!(
             *ISOLATE_QUEUE_SIZE > 0,
             "ISOLATE_QUEUE_SIZE must be greater than zero"

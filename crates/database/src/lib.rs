@@ -38,6 +38,7 @@ mod transaction;
 mod transaction_id_generator;
 mod transaction_index;
 mod virtual_tables;
+mod write_batcher;
 mod write_limits;
 mod write_log;
 mod write_throughput_limiter;
@@ -54,7 +55,6 @@ pub use database_index_workers::{
     index_writer::{
         IndexRateLimit,
         IndexWriter,
-        IndexWriterMode,
         PERFORM_BACKFILL_LABEL,
     },
     IndexWorker,

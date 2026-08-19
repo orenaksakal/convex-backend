@@ -1359,6 +1359,20 @@ pub fn log_reusable_context_init(udf_type: UdfType, reused: bool) {
 }
 
 register_convex_counter!(
+    NORMALIZE_ID_OLD_FORMAT_TOTAL,
+    "Number of successful calls to normalizeId with old ID formats",
+    &["format"],
+);
+
+pub fn log_normalize_id_old_format(format: &'static str) {
+    log_counter_with_labels(
+        &NORMALIZE_ID_OLD_FORMAT_TOTAL,
+        1,
+        vec![StaticMetricLabel::new("format", format)],
+    );
+}
+
+register_convex_counter!(
     DATABASE_UDF_CONTEXT_REUSE_LOOKUP_TOTAL,
     "Number of reusable database UDF context lookups by outcome",
     &["udf_type", "outcome"],

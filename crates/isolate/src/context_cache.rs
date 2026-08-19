@@ -178,7 +178,10 @@ impl<K: Clone + Eq + Hash, V> TinyLfuCache<K, V> {
     }
 
     fn with_protected_capacity(main_capacity: usize) -> Self {
-        assert!(main_capacity > 0, "protected cache capacity must be positive");
+        assert!(
+            main_capacity > 0,
+            "protected cache capacity must be positive"
+        );
         let frequency_aging_interval = main_capacity
             .checked_add(1)
             .and_then(|capacity| capacity.checked_mul(16))
@@ -260,13 +263,7 @@ impl<K: Clone + Eq + Hash, V> TinyLfuCache<K, V> {
     }
 
     fn insert_new(&mut self, key: K, value: V) -> CacheInsertionResult<K, V> {
-        self.insert(
-            key,
-            value,
-            CacheSegment::Window,
-            false,
-            self.main_capacity,
-        )
+        self.insert(key, value, CacheSegment::Window, false, self.main_capacity)
     }
 
     fn insert_new_without_growth(&mut self, key: K, value: V) -> CacheInsertionResult<K, V> {
@@ -637,9 +634,7 @@ impl ContextCache {
     #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self::with_budget(
-            Arc::new(ContextCacheBudget::new(
-                *MAX_REUSABLE_CONTEXTS_PER_ISOLATE,
-            )),
+            Arc::new(ContextCacheBudget::new(*MAX_REUSABLE_CONTEXTS_PER_ISOLATE)),
             MemoryPressureSignal::default(),
         )
     }
@@ -1321,9 +1316,7 @@ mod tests {
 
         for round in 0..4u16 {
             for offset in 0..cache.frequency_aging_interval as u16 {
-                cache.observe(&(
-                    2000 + round * cache.frequency_aging_interval as u16 + offset
-                ));
+                cache.observe(&(2000 + round * cache.frequency_aging_interval as u16 + offset));
             }
         }
         assert_eq!(cache.frequency(&1), 0);
@@ -1453,8 +1446,7 @@ mod tests {
         );
         assert_eq!(
             evicted.len(),
-            *MAX_REUSABLE_CONTEXTS_PER_ISOLATE
-                - CGROUP_PRESSURE_REUSABLE_CONTEXTS_PER_ISOLATE
+            *MAX_REUSABLE_CONTEXTS_PER_ISOLATE - CGROUP_PRESSURE_REUSABLE_CONTEXTS_PER_ISOLATE
         );
         assert!(evicted[1..].iter().all(|key| *key >= 3));
         assert!(cache.contains_key(&1));

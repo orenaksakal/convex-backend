@@ -161,9 +161,7 @@ export function SettingsSidebar({
 
 function useAllowedPages() {
   const { nents } = useNents();
-  const { isSelfHosted, usageLimitsEnabled } = useContext(
-    DeploymentInfoContext,
-  );
+  const { isSelfHosted } = useContext(DeploymentInfoContext);
 
   let pages = DEPLOYMENT_SETTINGS_PAGES;
 
@@ -188,11 +186,6 @@ function useAllowedPages() {
         page !== "releases" &&
         page !== "alerts",
     );
-  }
-
-  // Usage limits is feature-flagged; hide it from the sidebar when off.
-  if (!usageLimitsEnabled) {
-    pages = pages.filter(d => d !== "usage-limits");
   }
 
   return pages;

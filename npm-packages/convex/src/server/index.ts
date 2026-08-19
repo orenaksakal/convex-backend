@@ -103,6 +103,10 @@ export {
   internalMutationGeneric,
   internalQueryGeneric,
 } from "./impl/registration_impl.js";
+/**
+ * @internal
+ */
+export { getServiceToken } from "./impl/actions_impl.js";
 export type {
   TransactionMetric,
   TransactionMetrics,
@@ -223,8 +227,10 @@ export type {
   DataModelFromSchemaDefinition,
   SystemDataModel,
   SystemTableNames,
+  DocValidator,
+  SystemFieldValidators,
 } from "./schema.js";
-export { defineTable, defineSchema } from "./schema.js";
+export { defineTable, defineSchema, docValidator } from "./schema.js";
 
 export type {
   VectorSearch,

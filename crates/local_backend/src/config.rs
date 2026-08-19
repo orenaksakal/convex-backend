@@ -83,7 +83,12 @@ pub struct LocalConfig {
     pub instance_name: Option<String>,
 
     /// Instance secret for this backend.
-    #[clap(long, env = "INSTANCE_SECRET", hide_env_values = true, requires = "instance_name")]
+    #[clap(
+        long,
+        env = "INSTANCE_SECRET",
+        hide_env_values = true,
+        requires = "instance_name"
+    )]
     pub instance_secret: Option<String>,
 
     /// Identifier (like a user ID) to attach to any sentry
