@@ -29,16 +29,24 @@ ENV PATH="/app/scripts/node_modules/.bin:$PATH"
 COPY ./npm-packages ./npm-packages
 # Install dependencies and build
 WORKDIR /app/npm-packages
-RUN pnpm install --frozen-lockfile
+# Install only the self-hosted dashboard and its transitive workspace
+# dependencies. A whole-workspace install prepares unrelated docs Git
+# dependencies and can fail the release build even though they are not part of
+# this image.
+RUN pnpm install --frozen-lockfile \
+    --filter=dashboard-self-hosted... \
+    --filter=@convex-dev/eslint-plugin... \
+    --filter=lint...
 RUN pnpm --filter=@convex-dev/eslint-plugin build
 ENV NODE_ENV=production
 RUN turbo run build --filter=dashboard-self-hosted...
-RUN pnpm --filter=dashboard-self-hosted deploy --legacy --prod /tmp/deploy
 
 FROM ubuntu:noble@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
 ARG DEBIAN_FRONTEND=noninteractive
 ARG CONVEX_SELF_HOSTED_COMPATIBILITY_ID=development
+ARG VERGEN_GIT_SHA
 LABEL io.convex-freedom.compatibility-id=${CONVEX_SELF_HOSTED_COMPATIBILITY_ID}
+LABEL org.opencontainers.image.revision=${VERGEN_GIT_SHA}
 
 # Install Node.js from NodeSource repository
 # We extract the version from .nvmrc
@@ -56,12 +64,14 @@ EOF
 
 RUN groupadd --system --gid 1001 nodejs
 RUN useradd --system --uid 1001 --gid nodejs nextjs
-COPY --from=build --chown=nextjs:nodejs /tmp/deploy/ /app/
-WORKDIR /app
-# Since the pnpm workspace root (npm-packages/, where pnpm-lock.yaml lives) is
-# an ancestor of the package, Next infers it as outputFileTracingRoot and nests
-# the standalone output under the package's workspace-relative path.
-RUN cp /app/.next/standalone/dashboard-self-hosted/server.js .
+# Next's standalone output already contains the traced production dependency
+# closure. Copy it directly instead of running `pnpm deploy`, which resolves the
+# entire 149-package workspace and can execute or exhaust memory on unrelated
+# packages during an otherwise dashboard-only release.
+COPY --from=build --chown=nextjs:nodejs /app/npm-packages/dashboard-self-hosted/.next/standalone/ /app/
+COPY --from=build --chown=nextjs:nodejs /app/npm-packages/dashboard-self-hosted/.next/static/ /app/dashboard-self-hosted/.next/static/
+COPY --from=build --chown=nextjs:nodejs /app/npm-packages/dashboard-self-hosted/public/ /app/dashboard-self-hosted/public/
+WORKDIR /app/dashboard-self-hosted
 USER nextjs
 EXPOSE 6791
 ENV PORT=6791
