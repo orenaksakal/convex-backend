@@ -8,7 +8,6 @@ import {
   operatorGet,
   operatorMutation,
 } from "../../lib/operatorApi";
-import { ConfirmationPhrase } from "./ConfirmationPhrase";
 import { trackOperatorAction } from "./OperatorActionTracker";
 
 export function OperatorActionConfirmation({
@@ -20,7 +19,6 @@ export function OperatorActionConfirmation({
   onCancel: () => void;
   onAccepted: (result: ExecutedOperatorAction) => void;
 }) {
-  const [confirmation, setConfirmation] = useState("");
   const [executing, setExecuting] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const [submitted, setSubmitted] = useState<ExecutedOperatorAction | null>(
@@ -79,7 +77,7 @@ export function OperatorActionConfirmation({
       const result = await operatorMutation<ExecutedOperatorAction>(
         "/v1/actions/execute",
         "POST",
-        { token: prepared.token, confirmation },
+        { token: prepared.token },
       );
       if (result.state === "succeeded") {
         onAccepted(result);
@@ -105,10 +103,10 @@ export function OperatorActionConfirmation({
   return (
     <section
       className="rounded-lg border border-content-error bg-background-secondary p-4"
-      aria-labelledby={`confirm-${prepared.action.id}`}
+      aria-labelledby={`execute-${prepared.action.id}`}
     >
-      <h4 id={`confirm-${prepared.action.id}`} className="font-semibold">
-        Confirm operator action
+      <h4 id={`execute-${prepared.action.id}`} className="font-semibold">
+        Review operator action
       </h4>
       <p className="mt-1 text-sm">{prepared.action.summary}</p>
       <dl className="mt-3 grid gap-2 text-sm sm:grid-cols-[10rem_1fr]">
@@ -142,20 +140,6 @@ export function OperatorActionConfirmation({
           </>
         )}
       </dl>
-      <ConfirmationPhrase
-        className="mt-4 max-w-2xl"
-        value={prepared.action.confirmation}
-      />
-      <label className="mt-3 flex max-w-2xl flex-col gap-1 text-sm">
-        <span>Paste confirmation text</span>
-        <input
-          className="min-h-9 rounded-md border bg-background-primary px-3 font-mono text-content-primary"
-          value={confirmation}
-          onChange={(event) => setConfirmation(event.target.value)}
-          autoComplete="off"
-          spellCheck={false}
-        />
-      </label>
       {error && (
         <Callout variant="error">
           <div>
@@ -180,11 +164,11 @@ export function OperatorActionConfirmation({
       <div className="mt-4 flex flex-wrap gap-2">
         <Button
           variant="danger"
-          disabled={confirmation !== prepared.action.confirmation || executing}
+          disabled={executing}
           loading={executing}
           onClick={() => void execute()}
         >
-          Execute exact action
+          Execute action
         </Button>
         <Button variant="neutral" disabled={executing} onClick={onCancel}>
           Cancel

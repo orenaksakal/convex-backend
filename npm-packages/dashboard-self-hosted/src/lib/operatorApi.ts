@@ -309,7 +309,6 @@ export type PreparedOperatorAction = {
     kind: string;
     instanceId: string;
     expiresAt: string;
-    confirmation: string;
     expectedDowntime: string;
     backupPrerequisite: Pick<
       OperatorArchive,

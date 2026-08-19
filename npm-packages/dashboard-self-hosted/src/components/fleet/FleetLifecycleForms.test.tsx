@@ -37,7 +37,7 @@ beforeEach(() => {
 
 afterEach(() => jest.restoreAllMocks());
 
-test("adoption requires explicit ownership confirmation and reuses its intent on retry", async () => {
+test("adoption reviews the target and reuses its intent on retry", async () => {
   adoptMock
     .mockRejectedValueOnce(new Error("Response was lost"))
     .mockResolvedValueOnce({ deployment: {} as never });
@@ -56,7 +56,6 @@ test("adoption requires explicit ownership confirmation and reuses its intent on
   change("Dashboard URL", "https://dashboard.example.com");
   change("Private operator URL", "http://operator:7790");
   change("Database backup binding", "example-production");
-  change("Confirmation", "adopt example/production");
 
   const submit = screen.getByRole("button", {
     name: "Register external deployment",
@@ -72,7 +71,7 @@ test("adoption requires explicit ownership confirmation and reuses its intent on
   expect(adoptMock.mock.calls[0][2]).toBe(adoptMock.mock.calls[1][2]);
 });
 
-test("domain changes require the exact deployment confirmation and reuse their intent", async () => {
+test("domain changes reuse their intent across a retry", async () => {
   reconfigureMock
     .mockRejectedValueOnce(new Error("Response was lost"))
     .mockResolvedValueOnce({ deployment: {} as never, operation: null });
@@ -98,8 +97,6 @@ test("domain changes require the exact deployment confirmation and reuse their i
   );
 
   const submit = screen.getByRole("button", { name: "Queue domain change" });
-  expect(submit).toBeDisabled();
-  change("Confirmation", "change domains example/production");
   expect(submit).toBeEnabled();
   fireEvent.click(submit);
   expect(await screen.findByRole("alert")).toHaveTextContent(

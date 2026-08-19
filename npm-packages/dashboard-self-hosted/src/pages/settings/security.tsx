@@ -9,7 +9,6 @@ import { useDeploymentUrl } from "@common/lib/deploymentApi";
 import { Button } from "@ui/Button";
 import { Callout } from "@ui/Callout";
 import { OperatorActionConfirmation } from "../../components/operator/OperatorActionConfirmation";
-import { ConfirmationPhrase } from "../../components/operator/ConfirmationPhrase";
 import {
   HealthSignal,
   SignalLevel,
@@ -39,10 +38,9 @@ type SecurityForm = {
   dashboardCredentialRef: string;
 };
 
-type DeployConfirmation = {
+type DeployReview = {
   kind: "rotate" | "revoke";
   credential: DeployCredential;
-  value: string;
 };
 
 const DEPLOY_EXPIRY_PRESETS = [
@@ -120,8 +118,7 @@ export default function SecurityPage() {
         deploymentUrl
       )} --admin-key ${JSON.stringify(issuedDeployCredential.token)}`
     : null;
-  const [deployConfirmation, setDeployConfirmation] =
-    useState<DeployConfirmation | null>(null);
+  const [deployReview, setDeployReview] = useState<DeployReview | null>(null);
 
   const deployCredentialCapability =
     operator.metadata?.capabilities.deployCredentials;
@@ -271,31 +268,29 @@ export default function SecurityPage() {
   }
 
   async function executeDeployCredentialChange() {
-    if (!deployConfirmation) return;
-    const phrase = `${deployConfirmation.kind} ${deployConfirmation.credential.id}`;
-    if (deployConfirmation.value !== phrase) return;
+    if (!deployReview) return;
     setDeployBusy(true);
     setSessionError(null);
     setMessage(null);
     setIssuedDeployCredential(null);
     try {
-      if (deployConfirmation.kind === "rotate") {
+      if (deployReview.kind === "rotate") {
         const issued = await operatorMutation<IssuedDeployCredential>(
-          `/v1/deploy-credentials/${deployConfirmation.credential.id}/rotate`,
+          `/v1/deploy-credentials/${deployReview.credential.id}/rotate`,
           "POST",
           { expiresInDays: deployExpiryDays }
         );
         setIssuedDeployCredential(issued);
       } else {
         await operatorMutation<DeployCredential>(
-          `/v1/deploy-credentials/${deployConfirmation.credential.id}`,
+          `/v1/deploy-credentials/${deployReview.credential.id}`,
           "DELETE"
         );
         setMessage(
-          `Deploy-only key ${deployConfirmation.credential.label} was revoked immediately.`
+          `Deploy-only key ${deployReview.credential.label} was revoked immediately.`
         );
       }
-      setDeployConfirmation(null);
+      setDeployReview(null);
       await refreshDeployCredentials();
     } catch (requestError) {
       setSessionError(asError(requestError));
@@ -608,60 +603,39 @@ export default function SecurityPage() {
                   </Callout>
                 )}
 
-                {deployConfirmation && (
+                {deployReview && (
                   <div
                     className="mt-4 rounded-md border bg-background-primary p-3 text-sm"
                     role="alertdialog"
-                    aria-labelledby="deploy-confirmation-title"
+                    aria-labelledby="deploy-review-title"
                   >
                     <div
-                      id="deploy-confirmation-title"
+                      id="deploy-review-title"
                       className="font-semibold"
                     >
-                      Confirm {deployConfirmation.kind}
+                      Review {deployReview.kind}
                     </div>
                     <p className="mt-1 text-content-secondary">
                       This immediately invalidates the existing key.
-                      {deployConfirmation.kind === "rotate"
+                      {deployReview.kind === "rotate"
                         ? " A replacement secret will be shown once."
                         : " Running deployments that still use it will fail."}
                     </p>
-                    <ConfirmationPhrase
-                      className="mt-3 max-w-xl"
-                      value={`${deployConfirmation.kind} ${deployConfirmation.credential.id}`}
-                    />
-                    <label className="mt-3 flex max-w-xl flex-col gap-1">
-                      <span>Paste confirmation text</span>
-                      <input
-                        className={operatorInputClasses}
-                        value={deployConfirmation.value}
-                        autoComplete="off"
-                        onChange={(event) =>
-                          setDeployConfirmation({
-                            ...deployConfirmation,
-                            value: event.target.value,
-                          })
-                        }
-                      />
-                    </label>
                     <div className="mt-3 flex gap-2">
                       <Button
                         variant="danger"
-                        disabled={
-                          deployConfirmation.value !==
-                          `${deployConfirmation.kind} ${deployConfirmation.credential.id}`
-                        }
+                        disabled={deployBusy}
                         loading={deployBusy}
                         onClick={() => void executeDeployCredentialChange()}
                       >
-                        {deployConfirmation.kind === "rotate"
+                        {deployReview.kind === "rotate"
                           ? "Replace key"
                           : "Revoke key"}
                       </Button>
                       <Button
                         variant="neutral"
                         disabled={deployBusy}
-                        onClick={() => setDeployConfirmation(null)}
+                        onClick={() => setDeployReview(null)}
                       >
                         Cancel
                       </Button>
@@ -716,10 +690,9 @@ export default function SecurityPage() {
                                   !deployCredentialCapability.write
                                 }
                                 onClick={() =>
-                                  setDeployConfirmation({
+                                  setDeployReview({
                                     kind: "rotate",
                                     credential,
-                                    value: "",
                                   })
                                 }
                               >
@@ -734,10 +707,9 @@ export default function SecurityPage() {
                                   !deployCredentialCapability.write
                                 }
                                 onClick={() =>
-                                  setDeployConfirmation({
+                                  setDeployReview({
                                     kind: "revoke",
                                     credential,
-                                    value: "",
                                   })
                                 }
                               >

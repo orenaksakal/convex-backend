@@ -79,7 +79,6 @@ test("uses stable intent keys for adoption and domain reconfiguration", async ()
       applicationDomain: "example.com",
       deploymentDomain: "convex.example.com",
       siteDomain: "http.example.com",
-      confirmation: "change domains example/production",
     },
     "domain-intent-key",
   );

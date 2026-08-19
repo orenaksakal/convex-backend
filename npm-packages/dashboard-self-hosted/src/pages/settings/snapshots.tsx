@@ -5,7 +5,6 @@ import { DeploymentInfoContext } from "@common/lib/deploymentContext";
 import udfs from "@common/udfs";
 import { Button } from "@ui/Button";
 import { Callout } from "@ui/Callout";
-import { ConfirmationPhrase } from "../../components/operator/ConfirmationPhrase";
 import {
   OperatorField,
   operatorInputClasses,
@@ -39,9 +38,7 @@ export function SnapshotTools() {
   );
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
-  const [confirmation, setConfirmation] = useState("");
   const [repairReport, setRepairReport] = useState<unknown>(null);
-  const [repairConfirmation, setRepairConfirmation] = useState("");
   const [repairing, setRepairing] = useState<"dry-run" | "execute" | null>(
     null,
   );
@@ -55,8 +52,6 @@ export function SnapshotTools() {
     ),
   );
   const failedImport = imports.find((item) => item.state.state === "failed");
-  const importConfirmation = activeImport ? `import ${activeImport._id}` : "";
-  const repairPhrase = failedImport ? `repair ${failedImport._id}` : "";
   const canOperate = deployment.ok;
 
   async function requestExport() {
@@ -178,7 +173,6 @@ export function SnapshotTools() {
         },
       );
       const { importId } = (await finish.json()) as { importId: string };
-      setConfirmation("");
       if (!importId)
         throw new Error("Backend did not return an import identifier");
     } catch (requestError) {
@@ -189,15 +183,13 @@ export function SnapshotTools() {
   }
 
   async function confirmImport() {
-    if (!canOperate || !activeImport || confirmation !== importConfirmation)
-      return;
+    if (!canOperate || !activeImport) return;
     setError(null);
     try {
       await deploymentFetch(deployment, "/api/perform_import", {
         method: "POST",
         body: JSON.stringify({ importId: activeImport._id }),
       });
-      setConfirmation("");
     } catch (requestError) {
       setError(asError(requestError));
     }
@@ -220,8 +212,7 @@ export function SnapshotTools() {
     if (
       !canOperate ||
       !failedImport ||
-      repairInFlightRef.current ||
-      (execute && repairConfirmation !== repairPhrase)
+      repairInFlightRef.current
     )
       return;
     repairInFlightRef.current = true;
@@ -237,7 +228,6 @@ export function SnapshotTools() {
         },
       );
       setRepairReport(await response.json());
-      if (execute) setRepairConfirmation("");
     } catch (requestError) {
       setError(asError(requestError));
     } finally {
@@ -368,7 +358,7 @@ export function SnapshotTools() {
         </h4>
         <p className="mt-1 text-sm text-content-secondary">
           Uploads use bounded multipart chunks. The backend parses first and
-          requires a second confirmation before writing.
+          requires a separate reviewed execution before writing.
         </p>
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
           <OperatorField
@@ -384,7 +374,7 @@ export function SnapshotTools() {
           </OperatorField>
           <OperatorField
             label="Import mode"
-            description="Require empty is safest; replace all is destructive and requires backend confirmation."
+            description="Require empty is safest; replace all is destructive and requires a separate backend execution step."
           >
             <select
               className={operatorInputClasses}
@@ -416,27 +406,16 @@ export function SnapshotTools() {
 
         {activeImport?.state.state === "waiting_for_confirmation" && (
           <div className="mt-4 rounded-md border border-content-error bg-background-primary p-3 text-sm">
-            <div className="font-medium">Backend confirmation required</div>
+            <div className="font-medium">Backend review required</div>
             <pre className="mt-2 scrollbar max-h-64 overflow-auto rounded-sm bg-background-tertiary p-3 text-xs whitespace-pre-wrap">
               {activeImport.state.message_to_confirm}
             </pre>
-            <ConfirmationPhrase className="mt-3" value={importConfirmation} />
-            <label className="mt-3 flex flex-col gap-1">
-              Paste confirmation text
-              <input
-                className={operatorInputClasses}
-                value={confirmation}
-                onChange={(event) => setConfirmation(event.target.value)}
-                autoComplete="off"
-              />
-            </label>
             <Button
               className="mt-3"
               variant="danger"
-              disabled={confirmation !== importConfirmation}
               onClick={() => void confirmImport()}
             >
-              Confirm exact import
+              Execute import
             </Button>
           </div>
         )}
@@ -481,25 +460,12 @@ export function SnapshotTools() {
                   complete the gated recovery procedure.
                 </Callout>
               )}
-              <ConfirmationPhrase value={repairPhrase} />
-              <label className="flex flex-col gap-1 text-sm">
-                Paste confirmation text
-                <input
-                  className={operatorInputClasses}
-                  value={repairConfirmation}
-                  onChange={(event) =>
-                    setRepairConfirmation(event.target.value)
-                  }
-                  autoComplete="off"
-                />
-              </label>
               <Button
                 className="mt-3"
                 variant="danger"
                 disabled={
                   repairing !== null ||
-                  !backendCapabilities.snapshotCheckpointRepairExecute ||
-                  repairConfirmation !== repairPhrase
+                  !backendCapabilities.snapshotCheckpointRepairExecute
                 }
                 loading={repairing === "execute"}
                 onClick={() => void repair(true)}

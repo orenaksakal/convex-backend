@@ -28,7 +28,6 @@ import {
 } from "react";
 
 import { EnvironmentBadge } from "../components/fleet/EnvironmentBadge";
-import { ConfirmationPhrase } from "../components/operator/ConfirmationPhrase";
 import {
   HealthSignal,
   SignalLevel,
@@ -1134,11 +1133,9 @@ export function AdoptDeploymentModal({
   const [dashboardUrl, setDashboardUrl] = useState("");
   const [operatorUrl, setOperatorUrl] = useState("");
   const [databaseBindingAlias, setDatabaseBindingAlias] = useState("");
-  const [confirmation, setConfirmation] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const mutationIntent = useRef<FleetMutationIntent | null>(null);
-  const confirmationPhrase = `adopt ${project.slug}/${reference || "reference"}`;
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -1200,10 +1197,7 @@ export function AdoptDeploymentModal({
             id="fleet-adopt-reference"
             label="Reference"
             value={reference}
-            onChange={(event) => {
-              setReference(event.target.value);
-              setConfirmation("");
-            }}
+            onChange={(event) => setReference(event.target.value)}
             description="A unique lowercase deployment reference."
             required
           />
@@ -1308,14 +1302,6 @@ export function AdoptDeploymentModal({
           spellCheck={false}
           required
         />
-        <ConfirmationPhrase value={confirmationPhrase} />
-        <TextInput
-          id="fleet-adopt-confirmation"
-          label="Confirmation"
-          value={confirmation}
-          onChange={(event) => setConfirmation(event.target.value)}
-          autoComplete="off"
-        />
         {error ? (
           <p role="alert" className="text-sm text-content-errorSecondary">
             {error}
@@ -1334,8 +1320,7 @@ export function AdoptDeploymentModal({
               !deploymentUrl.trim() ||
               !dashboardUrl.trim() ||
               !operatorUrl.trim() ||
-              !databaseBindingAlias.trim() ||
-              confirmation !== confirmationPhrase
+              !databaseBindingAlias.trim()
             }
           >
             Register external deployment
@@ -1364,11 +1349,9 @@ export function ReconfigureDomainsModal({
   const [siteDomain, setSiteDomain] = useState(
     deployment.desiredPolicy.siteDomain ?? "",
   );
-  const [confirmation, setConfirmation] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const mutationIntent = useRef<FleetMutationIntent | null>(null);
-  const confirmationPhrase = `change domains ${deployment.projectSlug}/${deployment.reference}`;
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -1379,7 +1362,6 @@ export function ReconfigureDomainsModal({
         applicationDomain,
         deploymentDomain,
         siteDomain,
-        confirmation: confirmationPhrase,
       };
       await reconfigureFleetDeploymentDomains(
         deployment.id,
@@ -1446,14 +1428,6 @@ export function ReconfigureDomainsModal({
             required
           />
         </div>
-        <ConfirmationPhrase value={confirmationPhrase} />
-        <TextInput
-          id="fleet-domain-confirmation"
-          label="Confirmation"
-          value={confirmation}
-          onChange={(event) => setConfirmation(event.target.value)}
-          autoComplete="off"
-        />
         {error ? (
           <p role="alert" className="text-sm text-content-errorSecondary">
             {error}
@@ -1474,8 +1448,7 @@ export function ReconfigureDomainsModal({
                 applicationDomain,
                 deploymentDomain,
                 siteDomain,
-              ) ||
-              confirmation !== confirmationPhrase
+              )
             }
           >
             Queue domain change
@@ -1689,9 +1662,7 @@ function DeleteDeploymentModal({
   onClose(): void;
   onDeleted(): void;
 }) {
-  const confirmationPhrase = `delete ${deployment.projectSlug}/${deployment.reference}`;
   const adopted = deployment.observed?.adopted === true;
-  const [confirmation, setConfirmation] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const mutationIntent = useRef<FleetMutationIntent | null>(null);
@@ -1703,10 +1674,8 @@ function DeleteDeploymentModal({
     try {
       await deleteFleetDeployment(
         deployment.id,
-        confirmation,
         mutationIdempotencyKey(mutationIntent, {
           deploymentId: deployment.id,
-          confirmation,
         }),
       );
       onDeleted();
@@ -1768,21 +1737,6 @@ function DeleteDeploymentModal({
             failed teardown remains resumable from its last completed step.
           </p>
         ) : null}
-        <div className="rounded-xl border bg-background-primary p-4">
-          <ConfirmationPhrase value={confirmationPhrase} />
-          <div className="mt-4">
-            <TextInput
-              id="fleet-delete-confirmation"
-              label="Confirmation"
-              value={confirmation}
-              onChange={(event) => setConfirmation(event.target.value)}
-              autoComplete="off"
-              autoCapitalize="none"
-              spellCheck={false}
-              autoFocus
-            />
-          </div>
-        </div>
         {error ? (
           <p role="alert" className="text-sm text-content-errorSecondary">
             {error}
@@ -1796,7 +1750,7 @@ function DeleteDeploymentModal({
             type="submit"
             variant="danger"
             loading={loading}
-            disabled={confirmation !== confirmationPhrase}
+            disabled={loading}
           >
             {adopted ? "Remove from fleet" : "Delete instance permanently"}
           </Button>
@@ -1815,8 +1769,6 @@ function DeleteProjectModal({
   onClose(): void;
   onDeleted(): void;
 }) {
-  const confirmationPhrase = `delete project ${project.slug}`;
-  const [confirmation, setConfirmation] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const mutationIntent = useRef<FleetMutationIntent | null>(null);
@@ -1828,10 +1780,8 @@ function DeleteProjectModal({
     try {
       await deleteFleetProject(
         project.slug,
-        confirmation,
         mutationIdempotencyKey(mutationIntent, {
           projectSlug: project.slug,
-          confirmation,
         }),
       );
       onDeleted();
@@ -1865,21 +1815,6 @@ function DeleteProjectModal({
             </div>
           </div>
         </div>
-        <div className="rounded-xl border bg-background-primary p-4">
-          <ConfirmationPhrase value={confirmationPhrase} />
-          <div className="mt-4">
-            <TextInput
-              id="fleet-delete-project-confirmation"
-              label="Confirmation"
-              value={confirmation}
-              onChange={(event) => setConfirmation(event.target.value)}
-              autoComplete="off"
-              autoCapitalize="none"
-              spellCheck={false}
-              autoFocus
-            />
-          </div>
-        </div>
         {error ? (
           <p role="alert" className="text-sm text-content-errorSecondary">
             {error}
@@ -1893,7 +1828,7 @@ function DeleteProjectModal({
             type="submit"
             variant="danger"
             loading={loading}
-            disabled={confirmation !== confirmationPhrase}
+            disabled={loading}
           >
             Delete empty project
           </Button>

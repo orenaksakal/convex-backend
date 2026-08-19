@@ -368,8 +368,8 @@ function DatabaseSummary({
           </Button>
         </div>
         <p className="w-full text-xs text-content-secondary">
-          Both actions are deployment-scoped, audited, and require typed
-          confirmation before execution.
+          Both actions are deployment-scoped, target-bound, and audited before
+          execution.
         </p>
       </div>
     </section>
@@ -453,8 +453,8 @@ function AuthBridgeCard({
                 <div className="text-sm font-medium">Repair auth delivery</div>
                 <p className="text-xs text-content-secondary">
                   Release one exact dead-lettered event for another delivery
-                  attempt. The repair is audited and requires typed
-                  confirmation.
+                  attempt. The repair uses a short-lived prepared action and is
+                  audited.
                 </p>
               </div>
               <div className="flex max-w-xl flex-wrap items-end gap-2">
@@ -703,14 +703,14 @@ function asError(value: unknown) {
 function preparationStatus(kind: string) {
   switch (kind) {
     case "postgres-analyze":
-      return "Preparing table optimization confirmation.";
+      return "Preparing the table optimization action.";
     case "postgres-reset-statistics":
-      return "Preparing statistics repair confirmation.";
+      return "Preparing the statistics repair action.";
     case "auth-outbox-retry":
-      return "Preparing auth delivery repair confirmation.";
+      return "Preparing the auth delivery repair action.";
     case "impersonate-user":
-      return "Preparing application impersonation confirmation.";
+      return "Preparing the application impersonation action.";
     default:
-      return "Preparing operator action confirmation.";
+      return "Preparing the operator action.";
   }
 }

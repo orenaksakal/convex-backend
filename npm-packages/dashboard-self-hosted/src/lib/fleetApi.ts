@@ -154,7 +154,6 @@ export function renameFleetProject(
 
 export function deleteFleetProject(
   projectSlug: string,
-  confirmation: string,
   idempotencyKey: string,
 ) {
   return fleetRequest<{ project: FleetProject; removed: true }>(
@@ -162,7 +161,7 @@ export function deleteFleetProject(
     {
       method: "POST",
       headers: mutationHeaders(idempotencyKey),
-      body: JSON.stringify({ confirmation }),
+      body: JSON.stringify({}),
     },
   );
 }
@@ -222,7 +221,6 @@ export function reconfigureFleetDeploymentDomains(
     applicationDomain: string;
     deploymentDomain: string;
     siteDomain: string;
-    confirmation: string;
   },
   idempotencyKey: string,
 ) {
@@ -294,7 +292,6 @@ export function cloneFleetDeployment(
 
 export function deleteFleetDeployment(
   deploymentId: string,
-  confirmation: string,
   idempotencyKey: string,
 ) {
   return fleetRequest<{
@@ -304,7 +301,7 @@ export function deleteFleetDeployment(
   }>(`/v1/deployments/${encodeURIComponent(deploymentId)}/delete`, {
     method: "POST",
     headers: mutationHeaders(idempotencyKey),
-    body: JSON.stringify({ confirmation }),
+    body: JSON.stringify({}),
   });
 }
 

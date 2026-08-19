@@ -48,7 +48,6 @@ test("tracks an accepted durable action and reports terminal completion", async 
           kind: "manual-backup",
           instanceId: "app-one",
           expiresAt: "2026-08-12T12:05:00.000Z",
-          confirmation: "backup app-one",
           expectedDowntime: "none",
           backupPrerequisite: null,
           archive: null,
@@ -59,12 +58,15 @@ test("tracks an accepted durable action and reports terminal completion", async 
       onAccepted={onAccepted}
     />,
   );
-  fireEvent.change(
-    screen.getByRole("textbox", { name: "Paste confirmation text" }),
-    { target: { value: "backup app-one" } },
-  );
-  fireEvent.click(screen.getByRole("button", { name: "Execute exact action" }));
+  fireEvent.click(screen.getByRole("button", { name: "Execute action" }));
 
+  await waitFor(() =>
+    expect(operatorMutation).toHaveBeenCalledWith(
+      "/v1/actions/execute",
+      "POST",
+      { token: "prepared-token" },
+    ),
+  );
   await waitFor(() => expect(trackOperatorAction).toHaveBeenCalledWith(queued));
   await waitFor(() => expect(operatorGet).toHaveBeenCalledWith("/v1/actions/action-1"));
   await waitFor(() => expect(onAccepted).toHaveBeenCalledWith(completed));

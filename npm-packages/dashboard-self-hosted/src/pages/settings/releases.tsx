@@ -101,8 +101,8 @@ export default function ReleasesPage() {
           <p className="mt-1 max-w-prose text-sm text-content-secondary">
             Choose which backend version to deploy or return to a previous
             version. Saving a version does not change the running deployment;
-            starting an update or rollback always requires a separate
-            confirmation.
+            starting an update or rollback always requires a separate,
+            short-lived prepared action.
           </p>
         </header>
 

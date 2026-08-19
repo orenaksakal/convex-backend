@@ -281,7 +281,7 @@ export function SelfHostedCommandPalette({
             </div>
             <div className="border-t px-4 py-2 text-xs text-content-secondary">
               Navigation only. Restart, restore, release, rollback, repair, and
-              other destructive actions remain on their typed-confirmation
+              other destructive actions remain on their target-bound action
               pages.
             </div>
           </section>
